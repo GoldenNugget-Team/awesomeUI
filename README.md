@@ -1,48 +1,47 @@
 # awesomeUI
 
-Набор переиспользуемых UI-компонентов для PySide6 и SwiftUI, собранный из
-практических компонентов GoldenNugget и упрощённых standalone-виджетов.
+A collection of reusable UI components for PySide6 and SwiftUI, built from
+practical GoldenNugget components and simplified standalone widgets.
 
-Цель проекта — брать готовый компонент целиком и подключать его в новый проект
-без зависимости от бизнес-логики GoldenNugget.
+The goal is to copy a component into a new project and use it without depending
+on GoldenNugget business logic.
 
-## Возможности
+## Features
 
-- PySide6: карточки, бейджи статуса, поиск с debounce, loading-кнопки,
-  empty state и toast-уведомления.
-- SwiftUI: карточки, бейджи статуса, поле поиска, empty state, async-кнопки и
-  toast-модификатор.
-- Исходники виджетов не импортируют модули приложения GoldenNugget.
-- Компоненты используют системные возможности фреймворков и не требуют
-  сторонних UI-библиотек.
+- PySide6: cards, status badges, debounced search, loading buttons, empty
+  states, and toast notifications.
+- SwiftUI: cards, status badges, search fields, empty states, async buttons,
+  and a toast modifier.
+- Widget sources do not import GoldenNugget application modules.
+- Components use framework APIs and require no third-party UI libraries.
 
-## Структура
+## Structure
 
 ```text
 src/
 ├── widgets/
-│   ├── pyside6_widgets.py          # standalone PySide6-компоненты
-│   ├── swiftui/ReusableWidgets.swift # standalone SwiftUI-компоненты
-│   ├── README.md                   # подробные примеры виджетов
-│   └── __init__.py                 # короткие импорты
-├── gui/                            # перенесённые GUI-компоненты GoldenNugget
-└── qt/                             # Qt-ресурсы и custom elements
-styles/                             # существующие Qt-стили
+│   ├── pyside6_widgets.py             # standalone PySide6 components
+│   ├── swiftui/ReusableWidgets.swift  # standalone SwiftUI components
+│   ├── README.md                      # widget API and examples
+│   └── __init__.py                    # short Python imports
+├── gui/                               # imported GoldenNugget GUI components
+└── qt/                                # Qt resources and custom elements
+styles/                                # existing Qt styles
 ```
 
 ## PySide6
 
-Установка зависимости:
+Install the dependency:
 
 ```bash
 python -m pip install PySide6
 ```
 
-Минимальный пример:
+Minimal example:
 
 ```python
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
-from src.widgets import Card, LoadingButton, SearchField, StatusBadge, Toast
+from src.widgets import Card, LoadingButton, SearchField, StatusBadge
 
 app = QApplication([])
 window = QWidget()
@@ -62,12 +61,12 @@ window.show()
 app.exec()
 ```
 
-Для подробного API и дополнительных примеров см. [src/widgets/README.md](src/widgets/README.md).
+See [src/widgets/README.md](src/widgets/README.md) for the widget API and more examples.
 
 ## SwiftUI
 
-Добавьте `src/widgets/swiftui/ReusableWidgets.swift` в target приложения и
-используйте компоненты напрямую:
+Add `src/widgets/swiftui/ReusableWidgets.swift` to your app target and use the
+components directly:
 
 ```swift
 import SwiftUI
@@ -87,18 +86,18 @@ struct ContentView: View {
 }
 ```
 
-SwiftUI-часть рассчитана на современные версии SwiftUI, где доступны
-`ContentUnavailableView`, `Material` и structured concurrency.
+The SwiftUI components target modern SwiftUI versions with
+`ContentUnavailableView`, `Material`, and structured concurrency.
 
-## Принципы использования
+## Usage principles
 
-1. Копируйте только нужный файл или каталог `src/widgets`.
-2. Не смешивайте standalone-виджеты с application-specific страницами из
-   `src/gui` без необходимости.
-3. Переопределяйте цвета и размеры на уровне проекта, если нужен собственный
-   дизайн-системный слой.
+1. Copy only the file or directory you need from `src/widgets`.
+2. Keep standalone widgets separate from the application-specific pages in
+   `src/gui` unless you explicitly need those pages.
+3. Override colors and dimensions at the project level when using a custom
+   design system.
 
-## Лицензия
+## License
 
-См. [LICENSE](LICENSE).
+See [LICENSE](LICENSE).
 

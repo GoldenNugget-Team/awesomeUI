@@ -1,33 +1,13 @@
 # awesomeUI
+Random widgets for pyside and swiftui
 
-A collection of reusable UI components for PySide6 and SwiftUI, built from
-practical GoldenNugget components and simplified standalone widgets.
-
-The goal is to copy a component into a new project and use it without depending
-on GoldenNugget business logic.
-
-## Features
+## Widgets
 
 - PySide6: cards, status badges, debounced search, loading buttons, empty
   states, and toast notifications.
 - SwiftUI: cards, status badges, search fields, empty states, async buttons,
   and a toast modifier.
-- Widget sources do not import GoldenNugget application modules.
-- Components use framework APIs and require no third-party UI libraries.
 
-## Structure
-
-```text
-src/
-├── widgets/
-│   ├── pyside6_widgets.py             # standalone PySide6 components
-│   ├── swiftui/ReusableWidgets.swift  # standalone SwiftUI components
-│   ├── README.md                      # widget API and examples
-│   └── __init__.py                    # short Python imports
-├── gui/                               # imported GoldenNugget GUI components
-└── qt/                                # Qt resources and custom elements
-styles/                                # existing Qt styles
-```
 
 ## PySide6
 
@@ -37,7 +17,7 @@ Install the dependency:
 python -m pip install PySide6
 ```
 
-Minimal example:
+Example:
 
 ```python
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
@@ -88,14 +68,6 @@ struct ContentView: View {
 
 The SwiftUI components target modern SwiftUI versions with
 `ContentUnavailableView`, `Material`, and structured concurrency.
-
-## Usage principles
-
-1. Copy only the file or directory you need from `src/widgets`.
-2. Keep standalone widgets separate from the application-specific pages in
-   `src/gui` unless you explicitly need those pages.
-3. Override colors and dimensions at the project level when using a custom
-   design system.
 
 ## License
 

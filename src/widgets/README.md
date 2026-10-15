@@ -22,6 +22,33 @@ Toast.show_message(window, "Saved")
 
 The module only requires PySide6 and uses no application-specific imports.
 
+### Sidebar
+
+```python
+from src.widgets import Sidebar, SidebarTheme
+
+sidebar = Sidebar(theme=SidebarTheme(background="#101418", active_indicator="#7aa2ff"))
+sidebar.add_section("Menu")
+sidebar.add_item("home", "Home", icon=home_icon)
+sidebar.add_item("downloads", "Downloads", icon=dl_icon, badge="3")
+
+sidebar.add_group("ios", "iOS", icon=iphone_icon)
+sidebar.add_item("posterboard", "Posterboard", group="ios")
+
+sidebar.add_stretch()
+sidebar.add_footer_widget(user_card)
+
+sidebar.itemClicked.connect(lambda item_id: print(item_id))
+sidebar.toggle_collapsed()          # animated icon-only mode
+sidebar.set_expands_on_hover(True)  # expand while collapsed on hover
+sidebar.with_theme(width=280, item_radius=10)
+```
+
+Everything visual goes through `SidebarTheme` (colors, sizes, radius, widths,
+animation duration). Items support icons, badges, exclusive selection and
+groups; the footer slot accepts any widget.
+
+
 ## SwiftUI
 
 ```swift

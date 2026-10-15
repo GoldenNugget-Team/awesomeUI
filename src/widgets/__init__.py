@@ -5,6 +5,10 @@ from .pyside6_widgets import (
     EmptyState,
     LoadingButton,
     SearchField,
+    Sidebar,
+    SidebarGroup,
+    SidebarItem,
+    SidebarTheme,
     StatusBadge,
     Toast,
 )
@@ -14,7 +18,10 @@ __all__ = [
     "EmptyState",
     "LoadingButton",
     "SearchField",
+    "Sidebar",
+    "SidebarGroup",
+    "SidebarItem",
+    "SidebarTheme",
     "StatusBadge",
     "Toast",
 ]
-

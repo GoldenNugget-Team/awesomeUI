@@ -7,6 +7,7 @@ from typing import Optional
 import asyncio
 import os
 import queue
+import re
 import traceback
 import threading
 
@@ -46,6 +47,7 @@ def set_sudo_pwd(pwd: Optional[str]):
 
 class ApplyThread(QThread):
     progress = Signal(str)
+    operation_stage = Signal(str, str)
     alert = Signal(object)  # ApplyAlertMessage or None for sudo prompt
     finished_with_result = Signal(bool, str)  # success, error_message
     request_text = Signal(str, str, object)  # title, label, result box (main-thread prompt)
@@ -65,6 +67,7 @@ class ApplyThread(QThread):
         self.reset_pages = reset_pages
         self.success = False
         self._error_msg: str = ""
+        self.error_alert_sent = False
 
     def prompt_password(self, title: str, label: str) -> Optional[str]:
         # Modal dialogs must be built on the main thread (macOS raises
@@ -104,7 +107,15 @@ class ApplyThread(QThread):
                         ios=self.manager.get_current_device_version() or "unknown",
                         build=self.manager.get_current_device_build() or "unknown",
                         udid=self.manager.get_current_device_udid() or "unknown")
-            self._do_work()
+            completed = self._do_work()
+            if completed is not True:
+                from src.controllers.apply_history import record_operation
+                self.success = False
+                self._error_msg = self._error_msg or QCoreApplication.translate(
+                    "Nugget", "Operation stopped before completion. See the application log for details.")
+                record_operation(self.manager, mode, False, self._error_msg)
+                self.finished_with_result.emit(False, self._error_msg)
+                return
             self.success = True
             self._error_msg = ""
             log_context(f"FINISH {mode} OK")
@@ -118,11 +129,26 @@ class ApplyThread(QThread):
             self._log.error("%s failed: %s\n%s", mode, e, traceback_str)
             from src.controllers.apply_history import record_operation
             record_operation(self.manager, mode, False, self._error_msg)
+            if "skip_setup27.py" in traceback_str:
+                message = QCoreApplication.translate(
+                    "Nugget",
+                    "The restore finished, but the device disconnected while configuring Setup Assistant.")
+            elif type(e).__name__ == "ConnectionTerminatedError":
+                message = QCoreApplication.translate(
+                    "Nugget",
+                    "The device disconnected during file transfer. This does not by itself mean the file list is corrupted.")
+            else:
+                message = f"Operation failed: {e}"
+            backup_match = re.search(
+                r"Protective backup kept at:\s*(.+)", traceback_str)
+            backup_path = backup_match.group(1).strip() if backup_match else None
+            self.error_alert_sent = True
             self.alert.emit(ApplyAlertMessage(
-                f"Operation failed: {e}",
+                message,
                 title="Error",
                 icon=QMessageBox.Critical,
                 detailed_txt=traceback_str,
+                backup_path=backup_path,
                 exc_type=type(e),
                 exc_value=e,
             ))
@@ -136,17 +162,27 @@ class ApplyThread(QThread):
             self.progress.emit(txt)
 
     def alert_window(self, msg: ApplyAlertMessage):
+        if (msg is not None and msg.icon == QMessageBox.Information
+                and msg.title == QCoreApplication.tr("Success!")):
+            self._log.info("completed: %s", msg.txt)
+            return
         if msg is not None:
+            if msg.icon in (None, QMessageBox.Critical) or msg.exc_value is not None:
+                self._error_msg = msg.txt
+                self.error_alert_sent = True
             self._log.info("alert: %s | %s", getattr(msg, "title", ""), getattr(msg, "txt", ""))
         self.alert.emit(msg)
 
     def _do_work(self):
-        if self.reset_pages is None:
-            self.manager.apply_changes(self.update_label, self.alert_window,
-                                       self.prompt_password, self.prompt_user_choice)
-        else:
-            self.manager.reset_tweaks(self.reset_pages, self.settings, self.update_label,
-                                      self.alert_window, self.prompt_user_choice)
+        self.manager.operation_stage_callback = self.operation_stage.emit
+        try:
+            if self.reset_pages is None:
+                return self.manager.apply_changes(self.update_label, self.alert_window,
+                                                  self.prompt_password, self.prompt_user_choice)
+            return self.manager.reset_tweaks(self.reset_pages, self.settings, self.update_label,
+                                             self.alert_window, self.prompt_user_choice)
+        finally:
+            self.manager.operation_stage_callback = None
 
 
 class RestoreCacheThread(QThread):
@@ -171,6 +207,7 @@ class RestoreCacheThread(QThread):
     def __init__(self, manager):
         super().__init__()
         self.manager = manager
+        self._eta = None
 
     def prompt_user_choice(self, title: str, text: str) -> str:
         """Ask the user for a two-way decision on the main thread.
@@ -193,6 +230,8 @@ class RestoreCacheThread(QThread):
     def run(self):
         import logging
         from src.controllers.nugget_logger import log_context
+        from src.devicemanagement.eta import ProgressEta
+        self._eta = ProgressEta()
         log = logging.getLogger("GoldenNugget.restore_cache")
         try:
             log_context("START restore-cache",
@@ -360,7 +399,13 @@ class RestoreCacheThread(QThread):
         if isinstance(value, str):
             self.update_label(value)
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            self.update_label(f"Restoring... {value:.1f}%")
+            label = QCoreApplication.tr("📲 Restoring backup ({0}%)").format(round(value))
+            eta = getattr(self, "_eta", None)
+            if eta is not None:
+                remaining = eta.update(value)
+                if remaining:
+                    label += "\n" + QCoreApplication.tr("⏱ Time Left: {0}").format(remaining)
+            self.update_label(label)
 
     def _backup_password(self) -> str:
         try:
@@ -474,6 +519,77 @@ class RefreshDevicesThread(QThread):
                 exc_type=type(e),
                 exc_value=e,
             ))
+
+
+class DeviceMonitorThread(QThread):
+    """Listen for usbmux attach/detach notifications without doing lockdownd I/O."""
+
+    devices_changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._stop_event = threading.Event()
+
+    def request_stop(self):
+        self._stop_event.set()
+
+    @staticmethod
+    def _device_signature(devices):
+        return frozenset(
+            (device.serial, device.connection_type)
+            for device in devices if device.is_usb
+        )
+
+    def run(self):
+        try:
+            asyncio.run(self._watch())
+        except Exception:
+            import logging
+            logging.getLogger("GoldenNugget.device_monitor").exception(
+                "Device monitor stopped unexpectedly")
+
+    async def _watch(self):
+        import logging
+        from pymobiledevice3 import usbmux
+
+        log = logging.getLogger("GoldenNugget.device_monitor")
+        while not self._stop_event.is_set():
+            mux = None
+            try:
+                mux = await asyncio.wait_for(usbmux.create_mux(), timeout=3)
+                await asyncio.wait_for(mux.get_device_list(timeout=0.2), timeout=3)
+                if isinstance(mux, usbmux.PlistMuxConnection):
+                    await asyncio.wait_for(mux.listen(), timeout=3)
+                known_devices = self._device_signature(mux.devices)
+                pending_devices = known_devices
+                has_pending_change = False
+
+                while not self._stop_event.is_set():
+                    try:
+                        await asyncio.wait_for(mux.receive_device_state_update(), timeout=1.2)
+                    except asyncio.TimeoutError:
+                        if has_pending_change:
+                            if pending_devices != known_devices:
+                                known_devices = pending_devices
+                                self.devices_changed.emit()
+                            has_pending_change = False
+                        continue
+                    current_devices = self._device_signature(mux.devices)
+                    if current_devices != pending_devices:
+                        pending_devices = current_devices
+                        has_pending_change = True
+            except asyncio.CancelledError:
+                break
+            except Exception as error:
+                if not self._stop_event.is_set():
+                    log.debug("Device monitor reconnecting after: %s", error)
+                    await asyncio.sleep(1)
+            finally:
+                if mux is not None:
+                    try:
+                        await mux.close()
+                    except Exception:
+                        pass
 
 
 class ResetPairingThread(QThread):

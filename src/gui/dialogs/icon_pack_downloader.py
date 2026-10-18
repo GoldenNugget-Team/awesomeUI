@@ -18,8 +18,10 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QGridLayout, QWidget, QMessageBox, QFrame,
+    QScrollArea, QGridLayout, QWidget, QFrame,
 )
+
+from src.gui.dialogs.confirmation import ask_confirmation
 
 from src.controllers.icon_themes_api import (
     catalog_url, parse_catalog, DownloadableTheme,
@@ -126,6 +128,7 @@ class IconPackDownloaderDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        ColorThemeManager.instance().theme_changed.connect(self._retheme)
         self.setWindowTitle(QCoreApplication.translate("Nugget", "Download Icon Packs"))
         self.setModal(True)
         self.resize(760, 560)
@@ -261,15 +264,16 @@ class IconPackDownloaderDialog(QDialog):
         if self._downloading:
             return
         theme = card.theme
-        ret = QMessageBox.question(
+        confirmed = ask_confirmation(
             self,
             QCoreApplication.translate("Nugget", "Download Icon Pack"),
-            QCoreApplication.translate(
-                "Nugget",
-                "Download the \"{0}\" icon pack?\n\n{1}\n\nAuthor: {2}").format(
-                    theme.name, theme.description or "\u2014", theme.author or "\u2014"),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if ret != QMessageBox.StandardButton.Yes:
+            QCoreApplication.translate("Nugget", "{0}\n\nAuthor: {1}").format(
+                theme.description or QCoreApplication.translate(
+                    "Nugget", "Add this pack to your icon theme collection."),
+                theme.author or QCoreApplication.translate("Nugget", "Unknown")),
+            confirm_text=QCoreApplication.translate("Nugget", "Download"),
+            icon=":/icon/brush.svg", subject=theme.name)
+        if not confirmed:
             return
         self._download_theme(theme)
 

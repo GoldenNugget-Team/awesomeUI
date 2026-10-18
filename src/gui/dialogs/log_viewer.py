@@ -30,12 +30,12 @@ import os
 from PySide6.QtCore import QCoreApplication, QTimer, Qt, QUrl, QT_TRANSLATE_NOOP
 from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
+    QComboBox, QDialog, QHBoxLayout, QLabel, QPlainTextEdit,
     QPushButton, QVBoxLayout,
 )
 
 from src.controllers.nugget_logger import get_log_path
-from src.gui.ios.components import _auto_retheme, IOSSwitch
+from src.gui.ios.components import _auto_retheme, IOSSwitch, IOSSearchField
 from src.gui.theme import t
 
 # Newest slice of the log that is ever held in memory. The rotating handler
@@ -164,9 +164,8 @@ class LogViewerDialog(QDialog):
         filters = QHBoxLayout()
         filters.setSpacing(8)
 
-        self._search = QLineEdit(self)
+        self._search = IOSSearchField(self)
         self._search.setPlaceholderText(QCoreApplication.translate("Nugget", "Search log..."))
-        self._search.setClearButtonEnabled(True)
         self._search.textChanged.connect(self._reapply)
         filters.addWidget(self._search, 1)
 
@@ -228,6 +227,10 @@ class LogViewerDialog(QDialog):
         copy_btn.clicked.connect(self._copy_visible)
         buttons.addWidget(copy_btn)
 
+        diagnostics_btn = QPushButton(QCoreApplication.translate('Nugget', 'Export Diagnostics'), self)
+        diagnostics_btn.clicked.connect(self._export_diagnostics)
+        buttons.addWidget(diagnostics_btn)
+
         buttons.addStretch(1)
 
         close_btn = QPushButton(QCoreApplication.translate("Nugget", "Close"), self)
@@ -271,6 +274,16 @@ class LogViewerDialog(QDialog):
             return "", 0
         consumed = end + 1
         return data[:consumed].decode("utf-8", errors="replace"), consumed
+
+    def _export_diagnostics(self):
+        from src.controllers.settings import Settings
+        from src.gui.dialogs.diagnostics import DiagnosticsDialog
+        owner = self.parentWidget()
+        while owner is not None and not hasattr(owner, 'device_manager'):
+            owner = owner.parentWidget()
+        manager = getattr(owner, 'device_manager', None)
+        settings = getattr(owner, 'settings', None) or Settings('settings')
+        DiagnosticsDialog(settings, manager, parent=self).exec()
 
     def reload(self):
         """Discard the cached buffer and render from scratch."""

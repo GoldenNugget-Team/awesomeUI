@@ -2,8 +2,8 @@
 
 Usage::
 
-    from src.gui.theme.styles import STYLES
-    widget.setStyleSheet(STYLES["card"].format_map(theme.colors.__dict__))
+    from src.gui.theme import t
+    widget.setStyleSheet(t("card"))
 """
 
 
@@ -15,18 +15,27 @@ FONT_FAMILY = "Inter Variable"
 
 
 STYLES = {
+    "accent_swatch": """
+        QPushButton {{ background-color: {swatch}; border-radius: 16px;
+                       border: 3px solid transparent; }}
+        QPushButton:hover, QPushButton:focus {{ border-color: {text_secondary}; }}
+        QPushButton:checked {{ border-color: {text_primary}; }}
+    """,
     # ---- Components ------------------------------------------------------
     "text_input_dialog": """
         QDialog {{ background-color: {bg_elevated}; }}
         QLabel {{ color: {text_primary}; font-size: 15px; }}
         QLineEdit {{
             background-color: {bg_input};
-            border: none;
+            border: 1px solid {border};
             border-radius: 10px;
             color: {text_primary};
             font-size: 15px;
             padding: 12px 16px;
+            selection-background-color: {accent};
+            selection-color: {text_inverse};
         }}
+        QLineEdit:focus {{ border-color: {accent}; }}
         QPushButton {{
             background-color: {accent};
             border-radius: 10px;
@@ -65,9 +74,15 @@ STYLES = {
         QPushButton:hover {{ background-color: {accent_hover}; }}
     """,
 
+    "number_input_field": """
+        QSpinBox, QDoubleSpinBox {{ background-color: {bg_input}; color: {text_primary};
+            border: 1px solid {border}; border-radius: 10px;
+            font-size: 15px; padding: 12px 16px; }}
+    """,
+
     "section_header": (
         "font-size: 13px; font-weight: 600; color: {text_secondary}; "
-        "text-transform: uppercase; letter-spacing: 0.5px; padding-left: 4px;"
+        "text-transform: uppercase; letter-spacing: 0.5px; padding-left: 4px; background-color: transparent;"
     ),
 
     # Header of an IOSCollapsibleSection: same look as a plain section header,
@@ -76,39 +91,60 @@ STYLES = {
         QPushButton#iosCollapsibleHeader {{
             background: transparent;
             border: none;
-            color: {text_secondary};
-            font-size: 13px;
-            font-weight: 600;
+            color: {text_primary};
+            font-size: 14px;
+            font-weight: 650;
             text-align: left;
-            padding: 10px 4px 10px 4px;
+            padding: 9px 6px;
         }}
-        QPushButton#iosCollapsibleHeader:hover {{ color: {text_primary}; }}
+        QPushButton#iosCollapsibleHeader:hover {{ background: transparent; }}
         QPushButton#iosCollapsibleHeader:checked {{ color: {text_primary}; }}
     """,
 
     "card": """
         IOSCard {{
             background-color: {bg_secondary};
-            border-radius: 12px;
-            border: none;
+            border-radius: 14px;
+            border: 1px solid {border};
         }}
+        IOSCard QLabel {{ background-color: transparent; }}
     """,
 
-    "nav_bar": "background-color: {bg_secondary}; border-bottom: 1px solid {divider};",
+    "nav_bar": """
+        QWidget#iosNavBar {{
+            background-color: {bg_secondary};
+            border: 1px solid {divider};
+            border-radius: 14px;
+        }}
+    """,
 
     "nav_back_btn": """
         QPushButton {{
-            background: transparent;
-            color: {accent};
-            font-size: 17px;
-            font-weight: 400;
+            background: {bg_tertiary};
+            color: {text_primary};
+            font-size: 28px;
             border: none;
-            padding: 8px 0;
+            border-radius: 10px;
+            padding: 0px;
         }}
-        QPushButton:hover {{ color: {accent_hover}; }}
+        QPushButton:hover {{ background: {surface_hover}; }}
     """,
 
-    "nav_title": "font-size: 17px; font-weight: 600; color: {text_primary};",
+    "nav_title": "font-size: 20px; font-weight: 600; color: {text_primary}; background: transparent;",
+
+    "nav_category": """
+        QPushButton {{
+            background: transparent;
+            border: none;
+            border-radius: 8px;
+            padding: 0px 12px;
+            color: {text_secondary};
+            font-size: 13px;
+            font-weight: 500;
+        }}
+        QPushButton:hover {{ background: {bg_tertiary}; color: {text_primary}; }}
+        QPushButton:checked {{ background: {bg_tertiary}; color: {accent}; }}
+    """,
 
     "nav_right_btn": """
         QPushButton {{
@@ -133,6 +169,28 @@ STYLES = {
             border: none;
         }}
         QPushButton:hover {{ background-color: {surface_hover}; }}
+    """,
+
+    "value_row": """
+        QPushButton#iosValueRow {{ background: transparent; border: none; padding: 0px; }}
+        QLabel#valueRowTitle {{ color: {text_primary}; font-size: 15px; background: transparent; }}
+        QLabel#valueRowValue {{ color: {text_secondary}; font-size: 13px; background: transparent; }}
+        QLabel#valueRowArrow {{ color: {text_secondary}; font-size: 22px; background: transparent; }}
+    """,
+
+    "settings_action": """
+        QPushButton {{
+            background-color: {bg_secondary};
+            border: 1px solid {border};
+            border-radius: 14px;
+            color: {text_primary};
+            text-align: left;
+            font-size: 15px;
+            font-weight: 500;
+            padding: 10px 16px;
+        }}
+        QPushButton:hover {{ background-color: {bg_tertiary}; }}
+        QPushButton:focus {{ border-color: {accent}; }}
     """,
 
     "primary_button": """
@@ -176,18 +234,161 @@ STYLES = {
         }}
     """,
 
+    "search_clear_button": """
+        QToolButton {{ background: transparent; border: none; border-radius: 8px;
+            padding: 0px; margin: 0px; min-width: 0px; min-height: 0px; }}
+        QToolButton:hover, QToolButton:focus {{ background: {surface_hover}; }}
+        QToolButton:pressed {{ background: {border}; }}
+    """,
     "list_search": """
         QLineEdit {{
-            background-color: {bg_input}; color: {text_primary};
-            border: 1px solid {border}; border-radius: 10px;
-            padding: 10px 12px; font-size: 14px;
+            background-color: {bg_secondary}; color: {text_primary};
+            border: 1px solid {border}; border-radius: 12px;
+            padding: 0px 12px; font-size: 14px;
             selection-background-color: {accent};
         }}
-        QLineEdit:focus {{ border-color: {accent}; }}
+        QLineEdit:focus {{ border-color: {text_secondary}; }}
+    """,
+    "segmented_filter": """
+        QWidget#iosSegmentedFilter {{
+            background-color: {bg_secondary}; border: 1px solid {border}; border-radius: 12px;
+        }}
+        QWidget#iosSegmentedFilter QPushButton {{
+            background: transparent; border: none; border-radius: 8px;
+            padding: 0px 12px; color: {text_secondary}; font-size: 13px; font-weight: 500;
+        }}
+        QWidget#iosSegmentedFilter QPushButton:hover {{ color: {text_primary}; }}
+        QWidget#iosSegmentedFilter QPushButton:checked {{
+            background: {bg_tertiary}; color: {text_primary}; font-weight: 600;
+        }}
     """,
     "list_search_empty": """
         color: {text_secondary}; background-color: transparent;
         font-size: 14px; padding: 12px;
+    """,
+
+    "support_panel": """
+            QLabel#supportTitle {{ color: {text_primary}; font-size: 19px; font-weight: 600; }}
+            QLabel#supportMuted {{ color: {text_secondary}; font-size: 12px; }}
+            QLabel#supportCredit {{ color: {text_primary}; font-size: 13px; }}
+            QToolButton#supportLink {{ background: {bg_tertiary}; border: 1px solid {border}; border-radius: 14px; }}
+            QToolButton#supportLink:hover {{ border-color: {accent}; background: {surface_hover}; }}
+            QToolButton#supportAvatar {{ background: transparent; border: none; padding: 2px; }}
+            QPushButton#supportName {{ background: transparent; color: {text_primary}; font-size: 15px; font-weight: 600; border: none; padding: 5px; }}
+            QPushButton#supportName:hover {{ color: {accent}; }}
+            """,
+
+    "restore_progress": """
+        QWidget#restoreConnection {{ background: {bg_tertiary}; border: none; border-left: 3px solid {warning}; border-radius: 8px; }}
+        QLabel#restoreConnectionIcon {{ background: transparent; }}
+        QLabel#restoreConnectionDetail {{ color: {text_secondary}; font-size: 13px; background: transparent; }}
+        QLabel#restoreWarning {{ color: {text_primary}; font-size: 15px; font-weight: 600; background: transparent; }}
+        QLabel#restorePercent {{ color: {text_primary}; font-size: 18px; font-weight: 600; }}
+        QLabel#restoreTime {{ color: {text_primary}; font-size: 16px; font-weight: 600; }}
+        QLabel#restorePhase {{ color: {text_primary}; font-size: 18px; font-weight: 600; }}
+        QLabel#restoreStatus {{ color: {text_primary}; font-size: 14px; }}
+        QLabel#restoreMuted {{ color: {text_secondary}; font-size: 12px; }}
+        QWidget#restoreStep {{ background: {bg_tertiary}; border: 1px solid {border}; border-radius: 12px; }}
+        QWidget#restoreStep[state="active"] {{ border-color: {accent}; }}
+        QLabel#restoreStepTitle {{ color: {text_secondary}; font-size: 12px; background: transparent; }}
+    """,
+
+    "device_support_dialog": """
+        QDialog {{ background: {bg_primary}; }}
+        QScrollArea#compatScroll, QWidget#compatContent {{ background: transparent; border: none; }}
+        QLabel#compatTitle {{ color: {text_primary}; font-size: 22px; font-weight: 600; }}
+        QLabel#compatDevice {{ color: {text_primary}; font-size: 17px; font-weight: 600; }}
+        QLabel#compatBody {{ color: {text_primary}; font-size: 14px; }}
+        QLabel#compatMuted {{ color: {text_secondary}; font-size: 13px; }}
+        QLabel#compatSection {{ color: {text_primary}; font-size: 15px; font-weight: 600; }}
+        QLabel#compatCount {{ color: {text_primary}; font-size: 23px; font-weight: 600; }}
+        QLabel#compatWarning {{ color: {warning}; font-size: 13px; }}
+        QLabel#compatBadge {{
+            background: {bg_tertiary}; color: {success};
+            border: 1px solid {border}; border-radius: 10px;
+            padding: 6px 10px; font-size: 12px; font-weight: 600;
+        }}
+        QLabel#compatBadge[supportState="limited"] {{ color: {warning}; }}
+        QLabel#compatBadge[supportState="unsupported"] {{ color: {error}; }}
+    """,
+
+    "summary_dialog": """
+        QLabel#confirmTitle {{ font-size: 22px; }}
+        QPushButton {{ background-image: none; }}
+        QPushButton:disabled {{ background: {bg_tertiary}; color: {text_disabled}; }}
+        QCheckBox {{ color: {text_primary}; font-size: 14px; background: transparent; spacing: 10px; }}
+        QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 5px;
+            border: 1.5px solid {text_secondary}; background: {bg_input}; }}
+        QCheckBox::indicator:checked {{ background: {accent}; border-color: {accent}; }}
+    """,
+    "reset_dialog": """
+        QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; }}
+        QPushButton#resetSelection {{
+            background: {bg_secondary}; color: {text_primary};
+            border: 1px solid {border}; border-radius: 12px;
+            text-align: left; padding: 12px 16px;
+        }}
+        QPushButton#resetSelection:hover {{ background: {bg_tertiary}; }}
+        QPushButton#resetSelection:checked {{
+            background: {bg_tertiary}; border-color: {accent}; color: {accent};
+        }}
+        QPushButton:disabled {{ background: {bg_secondary}; color: {text_disabled}; }}
+    """,
+
+    "app_list_dialog": """
+            QDialog {{ background-color: {bg_elevated}; }}
+            QLabel {{ color: {text_primary}; font-size: 14px; }}
+            QLineEdit {{
+                background-color: {bg_input};
+                border: none;
+                border-radius: 10px;
+                color: {text_primary};
+                font-size: 14px;
+                padding: 10px 12px;
+            }}
+            QListWidget {{
+                background-color: {bg_secondary};
+                border: none;
+                border-radius: 10px;
+                color: {text_primary};
+                font-size: 14px;
+                padding: 6px;
+            }}
+            QListWidget::item {{ padding: 8px 12px; border: 1px solid {border}; border-radius: 12px; }}
+            QListWidget::item:selected {{ background-color: {bg_tertiary}; border-color: {accent}; color: {text_primary}; }}
+            QPushButton {{
+                background-color: {accent};
+                border: none;
+                border-radius: 10px;
+                color: {text_inverse};
+                font-size: 14px;
+                font-weight: 600;
+                padding: 10px 16px;
+            }}
+            QPushButton:hover {{ background-color: {accent_hover}; }}
+            QPushButton:disabled {{ background-color: {scrollbar}; color: {text_disabled}; }}
+                QLabel#appListTitle {{ color: {text_primary}; font-size: 22px; font-weight: 600; }}
+        QPushButton#appListClose {{ background-color: {surface_hover}; color: {text_primary}; }}
+    """,
+
+    "confirmation_dialog": """
+        QDialog#themedConfirmation {{ background-color: {bg_primary}; }}
+        QLabel#confirmationTitle {{ color: {text_primary}; font-size: 20px; font-weight: 600; background: transparent; }}
+        QLabel#confirmationSubject {{ color: {text_primary}; font-size: 16px; font-weight: 600; background: transparent; }}
+        QLabel#confirmationMessage {{ color: {text_secondary}; font-size: 14px; background: transparent; }}
+        QPushButton#confirmationCancel {{
+            background-color: {bg_secondary}; border: 1px solid {border}; border-radius: 12px;
+            color: {text_primary}; font-size: 15px; font-weight: 600; padding: 0px 18px;
+        }}
+        QPushButton#confirmationCancel:hover {{ background-color: {bg_tertiary}; }}
+        QPushButton#confirmationCancel:focus {{ border-color: {accent}; }}
+        QPushButton#confirmationAction {{
+            background-color: {accent}; border: none; border-radius: 12px;
+            color: {text_inverse}; font-size: 15px; font-weight: 600; padding: 0px 18px;
+        }}
+        QPushButton#confirmationAction:hover {{ background-color: {accent_hover}; }}
+        QPushButton#confirmationAction[destructive="true"] {{ background-color: {error}; }}
+        QPushButton#confirmationAction[destructive="true"]:hover {{ background-color: {error_hover}; }}
     """,
 
     "confirm_dialog": """
@@ -220,7 +421,11 @@ STYLES = {
     # IOSSwitch paints its own track/knob (it animates the knob position and
     # fades the track color), so there is no switch stylesheet here.
 
-    "value_label": "color: {text_secondary}; font-size: 14px;",
+    "row_title": "color: {text_primary}; font-size: 15px; background-color: transparent;",
+    "muted_caption": "color: {text_secondary}; font-size: 13px; background-color: transparent;",
+    "small_hint": "color: {text_secondary}; font-size: 12px; background-color: transparent;",
+    "edit_hint": "color: {accent}; font-size: 17px; background-color: transparent;",
+    "value_label": "color: {text_secondary}; font-size: 14px; background-color: transparent;",
 
     # ---- Preset popup (home screen, opened from the preset banner) ------
     "preset_popup": """
@@ -293,9 +498,61 @@ STYLES = {
         }}
         QListWidget::item:selected {{
             background-color: {scrollbar_pressed};
-            color: {text_inverse};
+            color: {text_primary};
             border-radius: 6px;
         }}
+    """,
+
+    "apply_preview_table": """
+        QTreeWidget {{ background: {bg_input}; color: {text_primary}; border: 1px solid {border}; border-radius: 10px; }}
+        QTreeWidget::item {{ padding: 8px 4px; }}
+        QTreeWidget::item:selected {{ background: {surface_hover}; color: {text_primary}; }}
+        QHeaderView::section {{ background: {bg_tertiary}; color: {text_secondary}; border: none; padding: 10px; }}
+    """,
+
+    "tweak_info_scroll": """
+        QScrollArea, QWidget#tweakInfoContent {{ background-color: {bg_elevated}; border: none; }}
+    """,
+
+    "tweak_favorite_button": """
+        QPushButton {{
+            background: transparent;
+            color: {text_secondary};
+            border: none;
+            border-radius: 13px;
+            padding: 0px;
+        }}
+        QPushButton:checked {{
+            background: {surface_hover};
+        }}
+        QPushButton:hover {{ background: {surface_hover}; }}
+    """,
+
+    "tweak_info_button": """
+        QPushButton {{
+            background: transparent;
+            color: {text_secondary};
+            border: none;
+            border-radius: 13px;
+            padding: 0px;
+        }}
+        QPushButton:hover {{
+            background: {surface_hover};
+            color: {text_primary};
+        }}
+    """,
+
+    "maintenance_button": """
+        QPushButton {{
+            background-color: {scrollbar};
+            border: none;
+            border-radius: 10px;
+            color: {error};
+            font-size: 15px;
+            font-weight: 600;
+            padding: 12px 16px;
+        }}
+        QPushButton:hover {{ background-color: {surface_hover}; }}
     """,
 
     "mini_button": """
@@ -303,6 +560,18 @@ STYLES = {
             background-color: {bg_tertiary};
             border-radius: 8px;
             color: {text_primary};
+            border: none;
+            padding: 6px 12px;
+            font-size: 13px;
+        }}
+        QPushButton:hover {{ background-color: {surface_hover}; }}
+    """,
+
+    "mini_button_danger": """
+        QPushButton {{
+            background-color: {bg_tertiary};
+            border-radius: 8px;
+            color: {error};
             border: none;
             padding: 6px 12px;
             font-size: 13px;
@@ -379,7 +648,7 @@ STYLES = {
         QPushButton:hover {{ background-color: {surface_hover}; }}
     """,
 
-    "download_card_icon": "background-color: {accent}; border-radius: 10px; color: white; font-size: 20px;",
+    "download_card_icon": "background-color: {accent}; border-radius: 10px; color: {text_inverse}; font-size: 20px;",
 
     "thumb_button": """
         QPushButton {{
@@ -395,7 +664,7 @@ STYLES = {
 
     # ---- Home ------------------------------------------------------------
     "home_title": "font-size: 32px; font-weight: 700; color: {text_primary};",
-    "home_subtitle": "color: {text_secondary}; font-size: 14px;",
+    "home_subtitle": "color: {text_secondary}; font-size: 13px; font-weight: 500; background: transparent;",
 
     "home_combo": """
         QComboBox {{
@@ -427,17 +696,13 @@ STYLES = {
         QPushButton:hover {{ background-color: {surface_hover}; }}
     """,
 
-    # Home feature tile: one big icon with the feature name underneath, all
-    # six tiles in one row. Replaces the old header+subtitle home cards. The
-    # tile uses bg_tertiary (not bg_secondary) so it actually reads as a
-    # raised tile against the page background, like the home screen mockup.
     "home_tile": """
         IOSCard {{
             background-color: {bg_tertiary};
             border-radius: 14px;
             border: 1px solid transparent;
         }}
-        IOSCard:hover {{ border-color: {accent}; }}
+        IOSCard QLabel {{ background-color: transparent; }}
     """,
 
     "home_tile_title": (
@@ -563,6 +828,30 @@ STYLES = {
     "about_credit_title": "color: {text_secondary}; font-size: 13px; font-weight: 600;",
     "about_link": "color: {accent}; font-size: 14px; border: none; background: transparent;",
     "about_link_hover": "color: {accent_hover}; font-size: 14px; border: none; background: transparent;",
+    "about_dialog": """
+        QDialog {{ background-color: {bg_elevated}; }}
+        QLabel {{ color: {text_primary}; background-color: transparent; }}
+        QDialogButtonBox QPushButton {{ background-color: {accent}; color: {text_inverse};
+            border: none; border-radius: 10px; padding: 10px 24px; font-size: 15px; font-weight: 600; }}
+        QDialogButtonBox QPushButton:hover {{ background-color: {accent_hover}; }}
+    """,
+    "about_version": "color: {text_secondary}; font-size: 15px; background: transparent;",
+    "about_description": "color: {text_secondary}; font-size: 15px; padding: 0 20px; background: transparent;",
+    "about_credit_heading": "font-size: 17px; font-weight: 600; color: {text_primary}; padding-top: 8px; background: transparent;",
+    "about_credit_role": "color: {text_secondary}; font-size: 14px; font-weight: 500; min-width: 160px; background: transparent;",
+    "about_credit_name": """
+        QToolButton {{ color: {accent}; font-size: 14px; background: transparent; border: none; padding: 0; text-align: left; }}
+        QToolButton:hover {{ color: {accent_hover}; text-decoration: underline; }}
+    """,
+    "about_footer_link": """
+        QToolButton {{ color: {accent}; font-size: 14px; font-weight: 500; background: transparent; border: none; padding: 4px 8px; }}
+        QToolButton:hover {{ color: {accent_hover}; text-decoration: underline; }}
+    """,
+    "about_credits_scroll": """
+        QScrollArea, QWidget {{ background: transparent; border: none; }}
+        QScrollBar:vertical {{ width: 6px; background: transparent; }}
+        QScrollBar::handle {{ background: {border}; border-radius: 3px; min-height: 30px; }}
+    """,
 
     # ---- Interface picker ------------------------------------------------
     "picker_frame": """
@@ -595,8 +884,13 @@ STYLES = {
     "global": """
         QWidget {{ color: {text_primary}; background-color: transparent; spacing: 0px; font-family: '{font_family}'; }}
         QWidget:focus {{ outline: none; }}
+        QToolTip {{ color: {text_primary}; background-color: {bg_elevated}; border: 1px solid {divider}; border-radius: 6px; padding: 6px 8px; }}
         QWidget[cls=central] {{ background-color: {bg_primary}; border-radius: 0px; border: 1px solid {divider}; }}
-        QLabel {{ font-size: 14px; }}
+        QLabel {{ font-size: 14px; background-color: transparent; }}
+        QDialog {{ background-color: {bg_elevated}; }}
+        QToolTip {{ background-color: {bg_elevated}; color: {text_primary}; border: 1px solid {border}; }}
+        QMenu {{ background-color: {bg_elevated}; color: {text_primary}; border: 1px solid {border}; }}
+        QMenu::item:selected {{ background-color: {accent}; color: {text_inverse}; }}
         QToolButton {{ background-color: {scrollbar}; border: none; color: {text_primary}; font-size: 14px; min-height: 35px; icon-size: 16px; padding-left: 10px; padding-right: 10px; border-radius: 8px; }}
         QToolButton[cls=sidebarBtn] {{ background-color: transparent; icon-size: 24px; }}
         QToolButton:pressed {{ background-color: {scrollbar_pressed}; color: {text_primary}; }}

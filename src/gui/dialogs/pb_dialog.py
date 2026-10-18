@@ -1,7 +1,7 @@
 import asyncio
 
 from PySide6.QtWidgets import QWizard, QWizardPage, QLabel, QVBoxLayout, QProgressBar, QSizePolicy, QMessageBox
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QCoreApplication, QSize, Qt
 
 from src.exceptions.nugget_exception import NuggetException
 from src.gui.thread_workers.apply_worker import ApplyAlertMessage
@@ -25,7 +25,7 @@ class PosterBoardDBWizard(QWizard):
         self.setButtonLayout([QWizard.WizardButton.CancelButton, QWizard.WizardButton.Stretch, QWizard.WizardButton.NextButton])
 
         # progress bar for the backup progress
-        self.backupInfoLbl = QLabel("Please enter your password on your device to continue")
+        self.backupInfoLbl = QLabel(QCoreApplication.translate("Nugget", "Please enter your password on your device to continue"))
         self.progressBar = QProgressBar()
         sizePolicy = QSizePolicy()
         sizePolicy.setHeightForWidth(self.progressBar.sizePolicy().hasHeightForWidth())
@@ -38,15 +38,15 @@ class PosterBoardDBWizard(QWizard):
         self.addPage(self.createBackupProgPage())
         self.addPage(self.createFinalPage())
 
-        self.setWindowTitle("Fetch Database File")
+        self.setWindowTitle(QCoreApplication.translate("Nugget", "Fetch Database File"))
 
     # PAGES
     def createPage1(self) -> QWizardPage:
         # information page telling the user about backing up
         page = QWizardPage()
-        page.setTitle("Notice")
-        message = QLabel("GoldenNugget needs to download the PosterBoard database from your device.")
-        contLbl = QLabel("\nYour device is not erased or wiped — only the PosterBoard data is fetched.")
+        page.setTitle(QCoreApplication.translate("Nugget", "Notice"))
+        message = QLabel(QCoreApplication.translate("Nugget", "GoldenNugget needs to download the PosterBoard database from your device."))
+        contLbl = QLabel("\n" + QCoreApplication.translate("Nugget", "Your device is not erased or wiped — only the PosterBoard data is fetched."))
         layout = QVBoxLayout(page)
         layout.addWidget(message)
         layout.addWidget(contLbl)
@@ -56,8 +56,8 @@ class PosterBoardDBWizard(QWizard):
     def createFinalPage(self) -> QWizardPage:
         # just say whether backup was successful
         page = QWizardPage()
-        page.setTitle("Backup Complete")
-        message = QLabel("Successfully got the file")
+        page.setTitle(QCoreApplication.translate("Nugget", "Backup Complete"))
+        message = QLabel(QCoreApplication.translate("Nugget", "Successfully got the file"))
         layout = QVBoxLayout(page)
         layout.addWidget(message)
         page.setLayout(layout)
@@ -66,7 +66,7 @@ class PosterBoardDBWizard(QWizard):
     def createBackupProgPage(self) -> QWizardPage:
         # show the progress bar of the backup
         page = QWizardPage()
-        page.setTitle("Backing Up Device...")
+        page.setTitle(QCoreApplication.translate("Nugget", "Backing Up Device..."))
         layout = QVBoxLayout(page)
         layout.addWidget(self.backupInfoLbl)
         layout.addWidget(self.progressBar)
@@ -76,10 +76,10 @@ class PosterBoardDBWizard(QWizard):
     def update_progress_bar(self, percent):
         print(f'backup progress: {percent}')
         if percent == 0.0:
-            self.backupInfoLbl.setText("Preparing device for backup...")
+            self.backupInfoLbl.setText(QCoreApplication.translate("Nugget", "Preparing device for backup..."))
         else:
             self.progressBar.setValue(int(percent))
-            self.backupInfoLbl.setText(f'Backing up...  {percent:6.1f}%')
+            self.backupInfoLbl.setText(QCoreApplication.translate("Nugget", "Backing up...  {0:6.1f}%").format(percent))
 
     def update_progress_lbl(self, txt: str):
         # hacky workaround

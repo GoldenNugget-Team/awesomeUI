@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QFileDialog, QDialog,
 )
 
+from src.gui.dialogs.confirmation import ask_confirmation
 from src.gui.theme import ColorThemeManager, t
 from src.gui.ios.components import _auto_retheme
 from src.controllers.preset_manager import PresetManager
@@ -128,13 +129,14 @@ def load_preset_flow(parent, window, pm: PresetManager, name: str,
     desc = meta.get("description", "") if meta else ""
     model = meta.get("device_model", "Unknown") if meta else "Unknown"
     ios = meta.get("ios_version", "Unknown") if meta else "Unknown"
-    confirm = QMessageBox.question(
-        parent, _T("Nugget", "Load Preset"),
-        _T("Nugget",
+    confirm = ask_confirmation(parent,
+            _T("Nugget", "Load Preset"),
+            _T("Nugget",
            "Load preset \"{0}\"?\n\nDescription: {1}\nDevice: {2} • iOS {3}"
            "\n\nThis will replace your current configuration.").format(
-               shown_name, desc, model, ios))
-    if confirm != QMessageBox.StandardButton.Yes:
+               shown_name, desc, model, ios),
+            confirm_text=QCoreApplication.translate("Nugget", "Load Preset"))
+    if not confirm:
         return False
 
     dm = window.device_manager
@@ -154,10 +156,10 @@ def load_preset_flow(parent, window, pm: PresetManager, name: str,
 
     compat_msg = daemon_compat_warning(name, meta, window)
     if compat_msg:
-        reply = QMessageBox.warning(
+        reply = ask_confirmation(
             parent, _T("Nugget", "Daemon Compatibility"), compat_msg,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
-        if reply != QMessageBox.StandardButton.Yes:
+            confirm_text=_T("Nugget", "Load Anyway"))
+        if not reply:
             return False
 
     if pm.preset_has_daemon_changes(name):
@@ -224,10 +226,12 @@ def delete_preset_flow(parent, pm: PresetManager, name: str) -> bool:
             parent, _T("Nugget", "Delete Preset"),
             _T("Nugget", "Select a preset to delete first."))
         return False
-    confirm = QMessageBox.question(
-        parent, _T("Nugget", "Delete Preset"),
-        _T("Nugget", "Delete preset \"{0}\"?").format(name))
-    if confirm != QMessageBox.StandardButton.Yes:
+    confirm = ask_confirmation(parent,
+            _T("Nugget", "Delete Preset"),
+            _T("Nugget", "Delete preset \"{0}\"?").format(name),
+            confirm_text=QCoreApplication.translate("Nugget", "Delete Preset"),
+            destructive=True)
+    if not confirm:
         return False
     if not pm.delete_preset(name):
         QMessageBox.critical(
@@ -243,15 +247,19 @@ def export_preset_flow(parent, pm: PresetManager, name: str) -> bool:
             parent, _T("Nugget", "Export Preset"),
             _T("Nugget", "Select a preset to export first."))
         return False
-    file_path, _ = QFileDialog.getSaveFileName(
+    file_path, selected_filter = QFileDialog.getSaveFileName(
         parent, _T("Nugget", "Export Preset"), f"{name}.json",
-        _T("Nugget", "JSON Files (*.json)"))
+        _T("Nugget", "JSON Files (*.json);;Portable Preset with Templates and Icons (*.gnpreset)"))
     if not file_path:
         return False
-    if not pm.export_preset(name, file_path):
+    if '*.gnpreset' in selected_filter and not file_path.lower().endswith('.gnpreset'):
+        file_path = os.path.splitext(file_path)[0] + '.gnpreset'
+    from src.gui.dialogs.file_task import run_file_task
+    if not run_file_task(parent, _T('Nugget', 'Export Preset'),
+                         lambda: pm.export_preset(name, file_path)):
         QMessageBox.critical(
             parent, _T("Nugget", "Export Preset"),
-            _T("Nugget", "Failed to export preset."))
+            _T("Nugget", "Failed to export preset:\n{0}").format(pm.last_transfer_error))
         return False
     QMessageBox.information(
         parent, _T("Nugget", "Export Preset"),
@@ -275,15 +283,19 @@ def partial_export_preset_flow(parent, pm: PresetManager, name: str) -> bool:
             parent, _T("Nugget", "Partial Export"),
             _T("Nugget", "Select at least one tweak to export."))
         return False
-    file_path, _ = QFileDialog.getSaveFileName(
+    file_path, selected_filter = QFileDialog.getSaveFileName(
         parent, _T("Nugget", "Partial Export"), f"{name}.json",
-        _T("Nugget", "JSON Files (*.json)"))
+        _T("Nugget", "JSON Files (*.json);;Portable Preset with Templates and Icons (*.gnpreset)"))
     if not file_path:
         return False
-    if not pm.export_preset(name, file_path, include=selected):
+    if '*.gnpreset' in selected_filter and not file_path.lower().endswith('.gnpreset'):
+        file_path = os.path.splitext(file_path)[0] + '.gnpreset'
+    from src.gui.dialogs.file_task import run_file_task
+    if not run_file_task(parent, _T('Nugget', 'Partial Export'),
+                         lambda: pm.export_preset(name, file_path, include=selected)):
         QMessageBox.critical(
             parent, _T("Nugget", "Partial Export"),
-            _T("Nugget", "Failed to export preset."))
+            _T("Nugget", "Failed to export preset:\n{0}").format(pm.last_transfer_error))
         return False
     QMessageBox.information(
         parent, _T("Nugget", "Partial Export"),
@@ -295,10 +307,12 @@ def import_preset_flow(parent, pm: PresetManager) -> Optional[str]:
     """Import a preset file. Returns the new preset name, or None."""
     file_path, _ = QFileDialog.getOpenFileName(
         parent, _T("Nugget", "Import Preset"), "",
-        _T("Nugget", "JSON Files (*.json)"))
+        _T("Nugget", "Preset Files (*.json *.gnpreset)"))
     if not file_path:
         return None
-    success, result = pm.import_preset(file_path)
+    from src.gui.dialogs.file_task import run_file_task
+    success, result = run_file_task(parent, _T('Nugget', 'Import Preset'),
+                                    lambda: pm.import_preset(file_path))
     if not success:
         QMessageBox.critical(
             parent, _T("Nugget", "Import Preset"),
@@ -375,7 +389,7 @@ class _PresetRow(QPushButton):
         c = ColorThemeManager.instance().colors
         self.setStyleSheet(t("preset_row"))
         self._check.setStyleSheet(
-            f"color: {c.accent}; font-size: 14px; font-weight: 700;")
+            f"color: {c.accent}; font-size: 14px; font-weight: 700; background-color: transparent;")
         self._title.setStyleSheet(
             f"color: {c.text_primary}; font-size: 15px; font-weight: 600;"
             "background-color: transparent;")
@@ -463,11 +477,15 @@ class PresetPopup(QFrame):
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._rows.insertWidget(0, self._empty)
 
-        # Delete sits alone on the last row, pinned to the far right
+        # Keep the popup quick, with a link to the full manager and Delete
+        # pinned to the far right.
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
         footer.setSpacing(6)
         footer.addStretch(1)
+        self._manage_btn = _MiniButton(_T("Nugget", "Manage presets"))
+        self._manage_btn.clicked.connect(self._open_manager)
+        footer.addWidget(self._manage_btn)
         self._delete_btn = _MiniButton(_T("Nugget", "Delete"), danger=True)
         self._delete_btn.clicked.connect(self._on_delete)
         footer.addWidget(self._delete_btn)
@@ -566,6 +584,13 @@ class PresetPopup(QFrame):
         if delete_preset_flow(self, self.pm, deleted):
             self._selected = None
             self.refresh()
+
+    def _open_manager(self):
+        self.close()
+        try:
+            self.window.open_presets_section()
+        except Exception:
+            pass
 
     # ---- show / hide with animation ------------------------------------
 

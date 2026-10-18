@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.gui.theme import ColorThemeManager
+from src.gui.theme.theme_manager import connect_visible_theme
 
 
 class PresetBanner(QFrame):
@@ -43,7 +44,7 @@ class PresetBanner(QFrame):
         layout.addWidget(self.manage_btn)
 
         self._retheme()
-        ColorThemeManager.instance().theme_changed.connect(self._retheme)
+        connect_visible_theme(self)
 
     def _retheme(self):
         c = ColorThemeManager.instance().colors
@@ -120,7 +121,7 @@ class PresetWidget(QWidget):
         layout.addWidget(self.banner)
 
         self._retheme()
-        ColorThemeManager.instance().theme_changed.connect(self._retheme)
+        connect_visible_theme(self)
 
     def _retheme(self):
         c = ColorThemeManager.instance().colors
@@ -168,6 +169,15 @@ class PresetWidget(QWidget):
         """Recompute and display the currently active preset."""
         name = self._current_preset_name()
         self.banner.set_active_preset(name, autosave=self._autosave_enabled())
+
+    def active_preset_name(self) -> str:
+        """Return the preset name currently represented by the banner."""
+        name = self._current_preset_name()
+        if name:
+            return name
+        return (QCoreApplication.translate("Nugget", "AutoSave")
+                if self._autosave_enabled()
+                else QCoreApplication.translate("Nugget", "Not Saved"))
 
     def _autosave_enabled(self) -> bool:
         if self.window is None:

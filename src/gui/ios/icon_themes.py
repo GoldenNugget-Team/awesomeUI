@@ -9,7 +9,8 @@ from PySide6.QtWidgets import (
 )
 
 from src.gui.ios.components import IOSCard
-from src.gui.theme import ColorThemeManager, theme_icon
+from src.gui.dialogs.confirmation import ask_confirmation
+from src.gui.theme import ColorThemeManager, theme_icon, t
 from src.gui.dialogs.icon_pack_downloader import IconPackDownloaderDialog
 from src.gui.dialogs.app_list_dialog import AppListExportDialog
 from src.tweaks.tweaks import tweaks, TweakID
@@ -56,7 +57,6 @@ class IOSIconThemesPage(QWidget):
         reset_btn.setCursor(Qt.PointingHandCursor)
         reset_btn.clicked.connect(self._reset_themes)
         self._reset_btn = reset_btn
-        self.content_layout.addWidget(reset_btn)
 
         download_btn = QPushButton(QCoreApplication.translate(
             "Nugget", "Download Icon Packs"))
@@ -64,7 +64,6 @@ class IOSIconThemesPage(QWidget):
         download_btn.setCursor(Qt.PointingHandCursor)
         download_btn.clicked.connect(self.show_download_packs)
         self._download_btn = download_btn
-        self.content_layout.addWidget(download_btn)
 
         apps_btn = QPushButton(QCoreApplication.translate(
             "Nugget", "Apps on iPhone"))
@@ -72,10 +71,19 @@ class IOSIconThemesPage(QWidget):
         apps_btn.setCursor(Qt.PointingHandCursor)
         apps_btn.clicked.connect(self.show_app_list_export)
         self._apps_btn = apps_btn
-        self.content_layout.addWidget(apps_btn)
+        self._add_btn = QPushButton(QCoreApplication.translate("Nugget", "Add Icon"))
+        self._add_btn.setCursor(Qt.PointingHandCursor)
+        self._add_btn.clicked.connect(lambda: self.show_add_icon_dialog())
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        for button in (self._add_btn, download_btn, apps_btn):
+            button.setFixedHeight(42)
+            actions.addWidget(button)
+        actions.addStretch(1)
+        self.content_layout.addLayout(actions)
 
         self.themes_placeholder = QLabel(QCoreApplication.translate(
-            "Nugget", "No icon themes yet. Tap + Add Icon or download a pack."))
+            "Nugget", "No icon themes yet. Choose Add Icon or download a pack."))
         self.themes_placeholder.setAlignment(Qt.AlignCenter)
         self.content_layout.addWidget(self.themes_placeholder)
 
@@ -84,21 +92,35 @@ class IOSIconThemesPage(QWidget):
         self.content_layout.addLayout(self._themes_box)
 
         self.content_layout.addStretch()
+        footer = QWidget(self)
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(16, 8, 16, 16)
+        maintenance = IOSCard(footer)
+        maintenance_layout = QVBoxLayout(maintenance)
+        maintenance_layout.setContentsMargins(16, 12, 16, 12)
+        maintenance_layout.setSpacing(8)
+        reset_btn.setFixedHeight(52)
+        maintenance_layout.addWidget(reset_btn)
+        self._reset_caption = QLabel(QCoreApplication.translate(
+            "Nugget", "Clear all icon themes from the current setup."))
+        self._reset_caption.setWordWrap(True)
+        maintenance_layout.addWidget(self._reset_caption)
+        footer_layout.addWidget(maintenance)
+        layout.addWidget(footer)
 
         self._retheme()
         self.refresh_themes()
 
     def _reset_themes(self):
-        reply = QMessageBox.question(
-            self.window,
+        reply = ask_confirmation(self.window,
             QCoreApplication.translate("Nugget", "Reset Icon Themes"),
             QCoreApplication.translate(
                 "Nugget",
                 "Remove all icon themes from GoldenNugget? The themed "
                 "home-screen icons already on the device are not touched."),
-            QMessageBox.Yes | QMessageBox.Cancel,
-            QMessageBox.StandardButton.Cancel)
-        if reply != QMessageBox.StandardButton.Yes:
+            confirm_text=QCoreApplication.translate("Nugget", "Reset Themes"),
+            destructive=True)
+        if not reply:
             return
         tweak = tweaks[TweakID.IconThemes]
         tweak.themes = []
@@ -108,9 +130,10 @@ class IOSIconThemesPage(QWidget):
     def _retheme(self):
         c = ColorThemeManager.instance().colors
         self._c = c
+        self._add_btn.setStyleSheet(t("primary_button") + "QPushButton { padding: 0px 16px; font-size: 14px; }")
         self._scroll.setStyleSheet(
             f"background-color: {c.bg_primary}; border: none;")
-        self._hint.setStyleSheet(f"color: {c.text_secondary}; font-size: 13px;")
+        self._hint.setStyleSheet(f"color: {c.text_secondary}; font-size: 13px; background-color: transparent;")
         self._download_btn.setStyleSheet(f"""
             QPushButton#downloadIconPacks {{
                 background-color: {c.bg_secondary};
@@ -119,7 +142,7 @@ class IOSIconThemesPage(QWidget):
                 color: {c.accent};
                 font-size: 14px;
                 font-weight: 600;
-                padding: 12px;
+                padding: 0px 14px;
             }}
             QPushButton#downloadIconPacks:hover {{ background-color: {c.surface_hover}; }}
         """)
@@ -131,24 +154,15 @@ class IOSIconThemesPage(QWidget):
                 color: {c.accent};
                 font-size: 14px;
                 font-weight: 600;
-                padding: 12px;
+                padding: 0px 14px;
             }}
             QPushButton#appsOnIphone:hover {{ background-color: {c.surface_hover}; }}
         """)
         self.themes_placeholder.setStyleSheet(
-            f"color: {c.text_secondary}; font-size: 15px; padding: 24px 0;")
-        self._reset_btn.setStyleSheet(f"""
-            QPushButton#resetIconThemes {{
-                background-color: {c.scrollbar};
-                border: none;
-                border-radius: 10px;
-                color: {c.error};
-                font-size: 15px;
-                font-weight: 600;
-                padding: 12px;
-            }}
-            QPushButton#resetIconThemes:hover {{ background-color: {c.surface_hover}; }}
-        """)
+            f"color: {c.text_secondary}; font-size: 15px; padding: 24px 0; background-color: transparent;")
+        self._reset_btn.setStyleSheet(t("maintenance_button"))
+        self._reset_caption.setStyleSheet(
+            f"color: {c.text_secondary}; font-size: 12px; background-color: transparent;")
         # Rebuild the theme cards so their hardcoded label colors follow the
         # current palette too.
         if hasattr(self, "_themes_box"):
@@ -183,7 +197,10 @@ class IOSIconThemesPage(QWidget):
             f"background-color: {c.bg_secondary}; border-radius: 12px;")
         pixmap = None
         data = theme.get_icon_data()
-        if data is None and theme.icon_path and os.path.isfile(theme.icon_path):
+        if data:
+            pixmap = QPixmap()
+            pixmap.loadFromData(data)
+        elif theme.icon_path and os.path.isfile(theme.icon_path):
             try:
                 pixmap = QPixmap(theme.icon_path)
             except Exception:
@@ -198,12 +215,12 @@ class IOSIconThemesPage(QWidget):
         text_col = QVBoxLayout()
         text_col.setSpacing(2)
         bundle_lbl = QLabel(theme.bundle_id)
-        bundle_lbl.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {c.text_primary};")
+        bundle_lbl.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {c.text_primary}; background-color: transparent;")
         bundle_lbl.setWordWrap(True)
         text_col.addWidget(bundle_lbl)
         name_text = theme.display_name if theme.display_name else QCoreApplication.translate("Nugget", "Hide label")
         name_lbl = QLabel(name_text)
-        name_lbl.setStyleSheet(f"font-size: 12px; color: {c.text_secondary};")
+        name_lbl.setStyleSheet(f"font-size: 12px; color: {c.text_secondary}; background-color: transparent;")
         name_lbl.setWordWrap(True)
         text_col.addWidget(name_lbl)
         row.addLayout(text_col, 1)
@@ -230,7 +247,9 @@ class IOSIconThemesPage(QWidget):
 
     def show_app_list_export(self):
         dialog = AppListExportDialog(self.window)
-        if dialog.exec() == QDialog.Accepted:
+        result = dialog.exec()
+        self.refresh_themes()
+        if result == QDialog.Accepted:
             app = dialog.selected_app()
             if app is None:
                 return
@@ -271,6 +290,7 @@ class IconThemeDialog(QDialog):
     def __init__(self, parent=None, bundle_id: str = "",
                  display_name: str = "", preset: bool = False):
         super().__init__(parent)
+        ColorThemeManager.instance().theme_changed.connect(self._retheme)
         self.setWindowTitle(QCoreApplication.translate("Nugget", "Add Icon Theme"))
         self.setModal(True)
         self.setMinimumWidth(380)

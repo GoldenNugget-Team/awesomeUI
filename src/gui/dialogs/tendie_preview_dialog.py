@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QDialog, QLabel, QPushButton, QVBoxLayout
 from src.gui.ios.phone_frame import (
     DEVICE_PT_H, DEVICE_PT_W, PhoneFrame,
 )
-from src.gui.theme import ColorThemeManager
+from src.gui.theme import ColorThemeManager, t
 
 _MAX_EDGE = 2556  # downscale wallpapers to the iPhone 15 native long edge
 
@@ -73,6 +73,7 @@ class TendiePreviewDialog(QDialog):
         layout.addWidget(self._variant_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 
         close_btn = QPushButton(QCoreApplication.translate("Nugget", "Close"))
+        self._close_btn = close_btn
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.setStyleSheet(
             f"QPushButton {{ background-color: {c.border}; color: {c.text_inverse}; "
@@ -82,18 +83,15 @@ class TendiePreviewDialog(QDialog):
         close_btn.clicked.connect(self.reject)
         layout.addWidget(close_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 
+        self._retheme()
+        ColorThemeManager.instance().theme_changed.connect(self._retheme)
         self._load()
 
     def _retheme(self):
-        c = ColorThemeManager.instance().colors
-        self._hint.setStyleSheet(
-            f"color: {c.text_secondary}; font-size: 12px; background: transparent;")
-        btn_style = (
-            f"QPushButton {{ background-color: {c.border}; color: {c.text_inverse}; "
-            "border: none; border-radius: 12px; padding: 10px 24px; "
-            "font-size: 14px; }"
-            f"QPushButton:hover {{ background-color: {c.scrollbar_pressed}; }}")
-        self._variant_btn.setStyleSheet(btn_style)
+        self.setStyleSheet(t('confirm_dialog'))
+        self._hint.setStyleSheet(t('home_subtitle'))
+        self._variant_btn.setStyleSheet(t('mini_button'))
+        self._close_btn.setStyleSheet(t('mini_button'))
 
     # ---- loading -------------------------------------------------------
 

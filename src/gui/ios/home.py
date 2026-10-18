@@ -1,26 +1,18 @@
+import sys
 from PySide6.QtCore import (
     Qt, QCoreApplication, Slot, QTimer, QSize, QEvent, Signal, QThread,
-    QPropertyAnimation, QEasingCurve,
 )
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-    QComboBox, QSizePolicy, QScrollArea, QGraphicsOpacityEffect, QProgressBar
+    QComboBox, QSizePolicy, QScrollArea, QProgressBar, QToolButton, QTabWidget
 )
 
-from src.gui.ios.components import IOSCard, IOSPrimaryButton, IOSDangerButton
-from src.gui.preset_widget import PresetWidget
+from src.gui.ios.components import IOSCard, IOSPrimaryButton
 from src.gui.theme import t, ColorThemeManager, theme_icon, theme_pixmap
 
-# Feature tile icon per home card (keyed by the card title).
-_FEATURE_ICONS = {
-    "PosterBoard": ":/icon/wallpaper.svg",
-    "Tweaks": ":/icon/toggles.svg",
-    "Daemons": ":/icon/hdd.svg",
-    "Status Bar": ":/icon/app-indicator.svg",
-    "Icon Themes": ":/icon/brush.svg",
-    "Passcode Theme": ":/icon/lock.svg",
-}
+from src.gui.ios.feature_icons import FEATURE_ICONS
+from src.devicemanagement.passcode_support import current_passcode_theme_reason
 
 
 class _StorageThread(QThread):
@@ -96,47 +88,18 @@ class _StorageThread(QThread):
 
 
 class _TileCard(IOSCard):
-    """A home feature tile (icon + name). Same look as a card, plus hover."""
+    """A home feature tile with a stationary hover outline."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._hover_effect = QGraphicsOpacityEffect(self)
-        self._hover_effect.setOpacity(0.92)
-        self.setGraphicsEffect(self._hover_effect)
-        self._hover_anim = QPropertyAnimation(self._hover_effect, b"opacity", self)
-        self._hover_anim.setDuration(180)
-        self._hover_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-    def _animate_hover(self, opacity: float):
-        self._hover_anim.stop()
-        self._hover_anim.setStartValue(self._hover_effect.opacity())
-        self._hover_anim.setEndValue(opacity)
-        self._hover_anim.start()
-
-    def enterEvent(self, event):
-        self._animate_hover(1.0)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        self._animate_hover(0.92)
-        super().leaveEvent(event)
+        self.setMouseTracking(False)
 
     def _retheme(self):
         self.setStyleSheet(t("home_tile"))
 
 
 class _CardGrid(QWidget):
-    """Responsive grid for the home feature tiles.
-
-    Reflows the visible tiles into columns based on the available width, up to
-    ``MAX_COLUMNS``: all six features stay on one row at every window size the
-    app allows (the window has a 1000px minimum and the iOS shell hides the
-    sidebar, so the home page always has room for the full row).
-    Tiles hidden on purpose (Status Bar on iOS 27, HotLoad-hidden features)
-    are tracked via their Show/Hide events, so the grid stays correct even
-    before the page itself has been shown. Hidden tiles are dropped from the
-    layout entirely and collapse cleanly.
-    """
+    """Keep visible home tiles in their final row, including before first show."""
     MIN_CARD_WIDTH = 140
     SPACING = 12
     MAX_COLUMNS = 6
@@ -167,31 +130,16 @@ class _CardGrid(QWidget):
                 self._reflow()
         return super().eventFilter(obj, event)
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._reflow()
-
     def reflow(self):
         self._reflow()
 
-    def _col_count(self, count: int) -> int:
-        """Pick the largest column count whose tiles stay wide enough.
-
-        Never more than ``MAX_COLUMNS``, so a wide window must not stretch the
-        tiles into a long strip; narrower windows drop a column instead of
-        squeezing the tiles below a readable width.
-        """
-        for n in range(min(count, self.MAX_COLUMNS), 0, -1):
-            avail = self.width() - self.SPACING * (n - 1)
-            if avail / n >= self.MIN_CARD_WIDTH:
-                return n
-        return 1
-
     def _reflow(self):
         include = [c for c in self._cards if c not in self._hidden]
+        self.setMinimumWidth(
+            len(include) * self.MIN_CARD_WIDTH + max(0, len(include) - 1) * self.SPACING)
         target = []
         if include:
-            cols = max(1, min(len(include), self._col_count(len(include))))
+            cols = min(len(include), self.MAX_COLUMNS)
             for i, card in enumerate(include):
                 target.append((i // cols, i % cols, card))
         key = tuple((r, c, id(w)) for r, c, w in target)
@@ -237,13 +185,13 @@ class IOSHomePage(QWidget):
 
         # Logo + Title row
         header = QHBoxLayout()
-        header.setSpacing(16)
+        header.setSpacing(8)
 
         # Load logo from resources
         self._logo = QLabel(self)
-        self._logo.setFixedSize(80, 80)
+        self._logo.setFixedSize(88, 88)
         self._logo.setScaledContents(True)
-        pixmap = QPixmap(":/credits/big_nugget.png")
+        pixmap = QPixmap(":/credits/nugget_half_eaten.png")
         if not pixmap.isNull():
             self._logo.setPixmap(pixmap)
         else:
@@ -251,72 +199,152 @@ class IOSHomePage(QWidget):
         header.addWidget(self._logo)
 
         title_layout = QVBoxLayout()
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(4)
+        title_layout.setAlignment(Qt.AlignVCenter)
         self._title = QLabel(QCoreApplication.translate("Nugget", "GoldenNugget"), self)
         self._title.setStyleSheet(t("home_title"))
+        self._title.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         title_layout.addWidget(self._title)
 
-        self.subtitle = QLabel(QCoreApplication.translate("Nugget", "iPhone (iOS —)"), self)
+        self.subtitle = QLabel(QCoreApplication.translate("Nugget", "No device connected"), self)
         self.subtitle.setStyleSheet(t("home_subtitle"))
+        self.subtitle.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.subtitle.setTextFormat(Qt.PlainText)
         title_layout.addWidget(self.subtitle)
-        header.addLayout(title_layout, 1)
+        header.addLayout(title_layout)
 
-        self.device_combo = QComboBox(self)
+        self.control_tabs = QTabWidget(self)
+        self.control_tabs.setDocumentMode(True)
+        self.control_tabs.setFixedHeight(116)
+        self.control_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self._developer_page = None
+        if not getattr(sys, 'frozen', False):
+            from src.gui.ios.developer import DeveloperPanel
+            self._developer_page = DeveloperPanel(self.window, self.control_tabs)
+
+        devices_page = QWidget(self.control_tabs)
+        self._devices_page = devices_page
+        devices_layout = QVBoxLayout(devices_page)
+        devices_layout.setContentsMargins(12, 8, 12, 8)
+        devices_layout.setSpacing(4)
+        self.device_combo = QComboBox(devices_page)
         self.device_combo.setFixedHeight(36)
-        self._style_device_combo()
-        self.populate_device_picker()
-        self.device_combo.currentIndexChanged.connect(self.on_device_changed)
-        header.addWidget(self.device_combo)
-
-        self._refresh_btn = QPushButton(self)
-        self._refresh_btn.setFixedSize(36, 36)
-        self._refresh_btn.setIconSize(QSize(18, 18))
-        self._refresh_btn.setStyleSheet(t("home_icon_button"))
-        self._apply_icon(self._refresh_btn, ":/icon/arrow-clockwise.svg")
-        self._refresh_btn.clicked.connect(self.refresh_devices)
-        header.addWidget(self._refresh_btn)
-
-        self._logs_btn = QPushButton(self)
-        self._logs_btn.setFixedSize(36, 36)
-        self._logs_btn.setIconSize(QSize(18, 18))
-        self._logs_btn.setStyleSheet(t("home_icon_button"))
-        self._logs_btn.setToolTip(QCoreApplication.translate("Nugget", "Application Log"))
-        self._apply_icon(self._logs_btn, ":/icon/file-earmark-text.svg")
-        self._logs_btn.clicked.connect(self.open_logs)
-        header.addWidget(self._logs_btn)
-
-        self._settings_btn = QPushButton(self)
-        self._settings_btn.setFixedSize(36, 36)
-        self._settings_btn.setIconSize(QSize(18, 18))
-        self._settings_btn.setStyleSheet(t("home_icon_button"))
-        self._apply_icon(self._settings_btn, ":/icon/gear.svg")
-        self._settings_btn.clicked.connect(self.open_settings)
-        header.addWidget(self._settings_btn)
-
-        layout.addLayout(header)
-
-        self.status_lbl = QLabel("", self)
-        self.status_lbl.setWordWrap(True)
+        devices_layout.addWidget(self.device_combo)
+        self.status_lbl = QLabel("", devices_page)
         self.status_lbl.setTextFormat(Qt.RichText)
-        layout.addWidget(self.status_lbl)
+        self.status_lbl.setOpenExternalLinks(False)
+        self.status_lbl.setWordWrap(False)
+        self.status_lbl.setStyleSheet("font-size: 11px; font-weight: 600;")
+        self.status_lbl.linkActivated.connect(self._show_device_support)
+        devices_layout.addWidget(self.status_lbl)
+        self.control_tabs.addTab(devices_page, QCoreApplication.translate("Nugget", "Devices"))
 
+        presets_page = QWidget(self.control_tabs)
+        self._presets_page = presets_page
+        presets_layout = QHBoxLayout(presets_page)
+        presets_layout.setContentsMargins(10, 6, 10, 6)
+        presets_layout.setSpacing(12)
         self.storage_card = IOSCard()
+        self.storage_card.setFixedHeight(64)
         storage_layout = QVBoxLayout(self.storage_card)
-        storage_layout.setContentsMargins(16, 12, 16, 12)
-        storage_layout.setSpacing(6)
-        self.storage_title = QLabel(QCoreApplication.translate("Nugget", "iPhone Storage"))
+        storage_layout.setContentsMargins(10, 7, 10, 7)
+        storage_layout.setSpacing(3)
+        self.storage_title = QLabel(QCoreApplication.translate("Nugget", "Device Storage"))
         self.storage_title.setStyleSheet(t("home_tile_title"))
         storage_layout.addWidget(self.storage_title)
         self.storage_bar = QProgressBar()
         self.storage_bar.setRange(0, 100)
         self.storage_bar.setValue(0)
         self.storage_bar.setTextVisible(False)
-        self.storage_bar.setFixedHeight(8)
+        self.storage_bar.setFixedHeight(6)
         storage_layout.addWidget(self.storage_bar)
         self.storage_lbl = QLabel(QCoreApplication.translate("Nugget", "Connect an iPhone to view storage"))
         self.storage_lbl.setStyleSheet(t("home_tile_subtitle"))
+        self.storage_lbl.setWordWrap(False)
         storage_layout.addWidget(self.storage_lbl)
-        layout.addWidget(self.storage_card)
+        self.presets_card = QWidget(presets_page)
+        preset_content = QHBoxLayout(self.presets_card)
+        preset_content.setContentsMargins(12, 4, 12, 4)
+        preset_content.setSpacing(10)
+        self.presets_icon = QLabel(self.presets_card)
+        self.presets_icon.setPixmap(theme_pixmap(":/icon/folder.svg", self._c.accent, 26))
+        self.presets_icon.setFixedSize(26, 26)
+        preset_content.addWidget(self.presets_icon)
+        preset_text = QVBoxLayout()
+        preset_text.setContentsMargins(0, 0, 0, 0)
+        preset_text.setSpacing(3)
+        self.presets_title = QLabel(QCoreApplication.translate("Nugget", "PRESET"))
+        self.presets_title.setStyleSheet(t("home_tile_title"))
+        preset_text.addWidget(self.presets_title)
+        self.presets_lbl = QLabel(QCoreApplication.translate("Nugget", "Manage presets"))
+        self.presets_lbl.setStyleSheet(t("home_tile_subtitle"))
+        self.presets_lbl.setWordWrap(False)
+        preset_text.addWidget(self.presets_lbl)
+        preset_content.addLayout(preset_text)
+        self.manage_presets_btn = QPushButton(
+            QCoreApplication.translate("Nugget", "Manage"), self.presets_card)
+        self.manage_presets_btn.setFixedHeight(36)
+        self.manage_presets_btn.setCursor(Qt.PointingHandCursor)
+        self._style_manage_presets_button()
+        self.manage_presets_btn.clicked.connect(self.open_presets_section)
+        preset_content.addSpacing(6)
+        preset_content.addWidget(self.manage_presets_btn)
+        preset_content.addStretch(1)
+        presets_layout.addWidget(self.presets_card, 1)
+        self._storage_page = QWidget(self.control_tabs)
+        storage_page_layout = QVBoxLayout(self._storage_page)
+        storage_page_layout.setContentsMargins(10, 6, 10, 6)
+        storage_page_layout.addWidget(self.storage_card)
+        self._apply_home_widget()
+
+        self._refresh_btn = QToolButton(self)
+        self._refresh_btn.setFixedSize(92, 40)
+        self._refresh_btn.setIconSize(QSize(21, 21))
+        self._refresh_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._refresh_btn.setText(QCoreApplication.translate("Nugget", "Refresh"))
+        self._style_utility_button(self._refresh_btn)
+        self._refresh_btn.setToolTip(QCoreApplication.translate("Nugget", "Refresh connected devices"))
+        self._apply_icon(self._refresh_btn, ":/icon/arrow-clockwise.svg")
+        self._refresh_btn.clicked.connect(self.refresh_devices)
+        self._logs_btn = QToolButton(self)
+        self._logs_btn.setFixedSize(88, 40)
+        self._logs_btn.setIconSize(QSize(21, 21))
+        self._logs_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._logs_btn.setText(QCoreApplication.translate("Nugget", "App Log"))
+        self._style_utility_button(self._logs_btn)
+        self._logs_btn.setToolTip(QCoreApplication.translate("Nugget", "Open application log"))
+        self._apply_icon(self._logs_btn, ":/icon/file-earmark-text.svg")
+        self._logs_btn.clicked.connect(self.open_logs)
+        self._settings_btn = QToolButton(self)
+        self._settings_btn.setFixedSize(94, 40)
+        self._settings_btn.setIconSize(QSize(21, 21))
+        self._settings_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._settings_btn.setText(QCoreApplication.translate("Nugget", "Settings"))
+        self._style_utility_button(self._settings_btn)
+        self._settings_btn.setToolTip(QCoreApplication.translate("Nugget", "Settings"))
+        self._apply_icon(self._settings_btn, ":/icon/gear.svg")
+        self._settings_btn.clicked.connect(self.open_settings)
+        utility_corner = QWidget(self.control_tabs)
+        utility_layout = QHBoxLayout(utility_corner)
+        utility_layout.setContentsMargins(0, 0, 4, 0)
+        utility_layout.setSpacing(2)
+        utility_layout.addWidget(self._refresh_btn)
+        utility_layout.addWidget(self._logs_btn)
+        utility_layout.addWidget(self._settings_btn)
+        self.control_tabs.setCornerWidget(utility_corner, Qt.TopRightCorner)
+        self._style_control_tabs()
+
+        header.addWidget(self.control_tabs, 1)
+        layout.addLayout(header)
+
+        self._style_device_combo()
+        self.populate_device_picker()
+        self.device_combo.currentIndexChanged.connect(self.on_device_changed)
+
         self._storage_thread = None
+        self.control_tabs.currentChanged.connect(self._on_control_tab_changed)
 
         cards_row = [self._make_card(
             "PosterBoard", "Animated wallpapers & templates", 2),
@@ -336,8 +364,7 @@ class IOSHomePage(QWidget):
         self.cards_grid = _CardGrid(cards_row)
         layout.addWidget(self.cards_grid)
 
-        # Apply / Reset share one row instead of stacking, which also keeps the
-        # preset widget closer to the top on short windows.
+        # Apply / Reset share one row on the home screen.
         actions = QHBoxLayout()
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(12)
@@ -346,15 +373,7 @@ class IOSHomePage(QWidget):
         apply_btn.clicked.connect(self.open_apply_classic)
         actions.addWidget(apply_btn, 1)
 
-        reset_btn = IOSDangerButton(QCoreApplication.translate("Nugget", "Reset Tweaks"))
-        reset_btn.clicked.connect(self.reset_tweaks)
-        actions.addWidget(reset_btn, 1)
-
         layout.addLayout(actions)
-
-        self.preset_widget = PresetWidget(
-            window=self.window, on_manage=self.open_presets_section, ios_style=True)
-        layout.addWidget(self.preset_widget)
 
         self.process_status_lbl = QLabel("", self)
         self.process_status_lbl.setWordWrap(True)
@@ -366,6 +385,13 @@ class IOSHomePage(QWidget):
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.hide_process_status)
 
+        from src.gui.ios.operation_result import OperationResultCard
+        self.result_card = OperationResultCard(self.open_logs, self.window.dismiss_operation_result)
+        layout.addWidget(self.result_card)
+
+        from src.gui.ios.support_panel import SupportPanel
+        self.support_panel = SupportPanel(self)
+        layout.addWidget(self.support_panel)
         layout.addStretch()
 
         # Paint the scroll area background for the active palette right away
@@ -380,17 +406,94 @@ class IOSHomePage(QWidget):
         self.device_combo.setStyleSheet(f"""
             QComboBox {{
                 background-color: {c.bg_secondary};
+                border: 1px solid {c.accent};
                 border-radius: 18px;
                 color: {c.text_primary};
                 padding: 0 16px;
                 font-size: 11.25pt;
             }}
-            QComboBox::drop-down {{ border: none; }}
+            QComboBox::drop-down {{
+                width: 30px;
+                border: none;
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+            }}
+            QComboBox::down-arrow {{
+                image: url(:/icon/caret-down-fill.svg);
+                width: 12px;
+                height: 12px;
+            }}
             QComboBox QAbstractItemView {{
                 background-color: {c.bg_secondary};
                 color: {c.text_primary};
                 selection-background-color: {c.accent};
             }}
+        """)
+
+    def _style_control_tabs(self):
+        c = self._c
+        self.control_tabs.setStyleSheet(f"""
+            QTabWidget::pane {{
+                background: {c.bg_secondary};
+                border: 1px solid {c.border};
+                border-radius: 10px;
+                top: -1px;
+            }}
+            QTabBar::tab {{
+                background: transparent;
+                color: {c.text_secondary};
+                border: 1px solid transparent;
+                border-radius: 7px;
+                padding: 5px 12px;
+                margin: 3px 2px;
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            QTabBar::tab:selected {{
+                background: {c.bg_tertiary};
+                color: {c.text_primary};
+                border-color: {c.border};
+            }}
+            QTabBar::tab:hover:!selected {{
+                background: {c.surface_hover};
+                color: {c.text_primary};
+            }}
+        """)
+
+    def _style_utility_button(self, button):
+        c = self._c
+        button.setStyleSheet(f"""
+            QToolButton {{
+                background: transparent;
+                color: {c.text_secondary};
+                border: 1px solid transparent;
+                border-radius: 12px;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 4px;
+            }}
+            QToolButton:hover {{
+                background: {c.bg_secondary};
+                color: {c.text_primary};
+                border-color: {c.border};
+            }}
+            QToolButton:pressed {{ background: {c.surface_hover}; }}
+        """)
+
+    def _style_manage_presets_button(self):
+        c = self._c
+        self.manage_presets_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {c.accent};
+                color: {c.text_inverse};
+                border: none;
+                border-radius: 8px;
+                padding: 0 16px;
+                font-size: 12px;
+                font-weight: 700;
+            }}
+            QPushButton:hover {{ background: {c.accent_hover}; }}
+            QPushButton:pressed {{ background: {c.accent}; }}
         """)
 
     def _apply_icon(self, button, resource_path: str):
@@ -404,12 +507,13 @@ class IOSHomePage(QWidget):
             self._logo.setStyleSheet(f"background-color: {c.bg_secondary}; border-radius: 14px;")
         self._title.setStyleSheet(t("home_title"))
         self.subtitle.setStyleSheet(t("home_subtitle"))
+        self._style_control_tabs()
         self._style_device_combo()
-        self._refresh_btn.setStyleSheet(t("home_icon_button"))
+        self._style_utility_button(self._refresh_btn)
         self._apply_icon(self._refresh_btn, ":/icon/arrow-clockwise.svg")
-        self._logs_btn.setStyleSheet(t("home_icon_button"))
+        self._style_utility_button(self._logs_btn)
         self._apply_icon(self._logs_btn, ":/icon/file-earmark-text.svg")
-        self._settings_btn.setStyleSheet(t("home_icon_button"))
+        self._style_utility_button(self._settings_btn)
         self._apply_icon(self._settings_btn, ":/icon/gear.svg")
         self.storage_title.setStyleSheet(t("home_tile_title"))
         self.storage_lbl.setStyleSheet(t("home_tile_subtitle"))
@@ -417,6 +521,10 @@ class IOSHomePage(QWidget):
             QProgressBar {{ background: {c.bg_input}; border: none; border-radius: 4px; }}
             QProgressBar::chunk {{ background: {c.accent}; border-radius: 4px; }}
         """)
+        self.presets_title.setStyleSheet(t("home_tile_title"))
+        self.presets_lbl.setStyleSheet(t("home_tile_subtitle"))
+        self.presets_icon.setPixmap(theme_pixmap(":/icon/folder.svg", c.accent, 26))
+        self._style_manage_presets_button()
         self.process_status_lbl.setStyleSheet(t("process_status_green"))
         self.update_status()
         # Feature tiles: recolor the icon and restyle the two labels
@@ -424,26 +532,45 @@ class IOSHomePage(QWidget):
             self._paint_tile_icon(icon_lbl, icon_res)
             title_lbl.setStyleSheet(t("home_tile_title"))
             sub_lbl.setStyleSheet(t("home_tile_subtitle"))
+        self.update_passcode_support()
 
     def populate_device_picker(self):
         self.device_combo.blockSignals(True)
         self.device_combo.clear()
+        usb_devices = []
         try:
             devices = self.window.device_manager.devices
-            if devices:
-                for device in devices:
-                    tag = " (@ USB)" if device.connected_via_usb else " (@ WiFi)"
-                    self.device_combo.addItem(f"{device.name}{tag}")
+            usb_devices = [
+                (index, device) for index, device in enumerate(devices)
+                if device.connected_via_usb
+            ]
+            if usb_devices:
+                for device_index, device in usb_devices:
+                    self.device_combo.addItem(
+                        theme_icon(":/icon/phone.svg", self._c.text_primary), device.name)
+                    self.device_combo.setItemData(
+                        self.device_combo.count() - 1, device_index, Qt.UserRole)
+                selected = next(
+                    (position for position, (device_index, _) in enumerate(usb_devices)
+                     if device_index == self.window.device_manager.current_device_index),
+                    0)
+                self.device_combo.setCurrentIndex(selected)
             else:
                 self.device_combo.addItem(QCoreApplication.translate("QCoreApplication", "No Device"))
         except Exception:
             self.device_combo.addItem(QCoreApplication.translate("QCoreApplication", "No Device"))
+            usb_devices = []
         self.device_combo.blockSignals(False)
+        self.device_combo.view().setMinimumWidth(max(
+            self.device_combo.width(), self.device_combo.view().sizeHintForColumn(0) + 64))
 
     @Slot()
     def on_device_changed(self, index):
-        if len(self.window.device_manager.devices) > 0 and index >= 0:
-            self.window.change_selected_device(index)
+        if getattr(self, '_support_dialog', None) is not None:
+            self._support_dialog.close()
+        device_index = self.device_combo.itemData(index, Qt.UserRole)
+        if device_index is not None:
+            self.window.change_selected_device(device_index)
             self.update_device_info()
             self.update_status()
 
@@ -469,7 +596,9 @@ class IOSHomePage(QWidget):
         self.window.show_ios_page(index)
 
     def open_apply_classic(self):
-        self.window.apply_changes()
+        """Open the dedicated Apply page before starting an operation."""
+        self.window.show_ios_page(6)
+        self.window._sync_sidebar_selection()
 
     def reset_tweaks(self):
         from src.gui.dialogs.reset_dialog import ResetDialog
@@ -485,10 +614,12 @@ class IOSHomePage(QWidget):
         else:
             color = c.accent
         self.process_status_lbl.setStyleSheet(
-            f"font-size: 14px; font-weight: 600; color: {color};")
+            f"font-size: 14px; font-weight: 600; color: {color}; background-color: transparent;")
         self.process_status_lbl.setText(text)
         self.process_status_lbl.show()
-        self._hide_timer.start(6000)
+        self._hide_timer.stop()
+        if success is not False and not getattr(self.window, "apply_in_progress", False):
+            self._hide_timer.start(6000)
 
     def hide_process_status(self):
         self.process_status_lbl.hide()
@@ -498,8 +629,6 @@ class IOSHomePage(QWidget):
         try:
             if self.window.device_manager.get_current_device_udid():
                 if not self.window.device_manager.get_current_device_is_supported_by_fork():
-                    # the fork only supports iOS 26.2+; anything older cannot
-                    # be tweaked, so never show it as supported
                     status_text = QCoreApplication.translate(
                         "QCoreApplication", "Not Supported.")
                     color = c.error
@@ -515,18 +644,72 @@ class IOSHomePage(QWidget):
         except AttributeError:
             status_text = QCoreApplication.translate("Nugget", "Not connected")
             color = c.text_primary
-        self.status_lbl.setText(f"<span style='color:{color};'>{status_text}</span>")
+        if self.window.device_manager.get_current_device_udid():
+            self.status_lbl.setText(
+                f"<a href='support' style='color:{color}; text-decoration:none;'>"
+                f"{status_text}  ⓘ</a>")
+            self.status_lbl.setToolTip(QCoreApplication.translate(
+                "Nugget", "View device compatibility and safety restrictions."))
+        else:
+            self.status_lbl.setText(f"<span style='color:{color};'>{status_text}</span>")
+            self.status_lbl.setToolTip("")
+        self.status_lbl.setStyleSheet(
+            f"font-size: 11px; font-weight: 600; padding-left: 2px; color: {color};")
+
+    def _show_device_support(self, _link=None):
+        if not self.window.device_manager.get_current_device_udid():
+            return
+        from src.gui.dialogs.device_support import DeviceSupportDialog
+        previous = getattr(self, '_support_dialog', None)
+        if previous is not None:
+            previous.raise_()
+            previous.activateWindow()
+            return
+        dialog = DeviceSupportDialog(self.window.device_manager, self.window)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        self._support_dialog = dialog
+        dialog.finished.connect(lambda: setattr(self, '_support_dialog', None))
+        dialog.show()
 
     def update_device_info(self):
+        if getattr(self, '_support_dialog', None) is not None:
+            self._support_dialog.close()
         try:
-            ver = self.window.device_manager.get_current_device_version() or "—"
-            build = self.window.device_manager.get_current_device_build() or "—"
-            self.subtitle.setText(QCoreApplication.translate("Nugget", "iPhone (iOS {0} {1})").format(ver, build))
+            ver = self.window.device_manager.get_current_device_version()
+            build = self.window.device_manager.get_current_device_build()
+            if ver:
+                text = QCoreApplication.translate("Nugget", "iOS {0}").format(ver)
+                if build:
+                    text += "  ·  " + QCoreApplication.translate("Nugget", "Build {0}").format(build)
+                self.subtitle.setText(text)
+            else:
+                self.subtitle.setText(QCoreApplication.translate("Nugget", "No device connected"))
         except AttributeError:
-            self.subtitle.setText(QCoreApplication.translate("Nugget", "iPhone (iOS —)"))
+            self.subtitle.setText(QCoreApplication.translate("Nugget", "No device connected"))
+        self.update_passcode_support()
         self._refresh_storage()
 
+    def update_passcode_support(self):
+        reason = current_passcode_theme_reason(self.window.device_manager)
+        self.passcode_theme_card.setEnabled(not reason)
+        icon, resource, title, caption = self._tiles[-1]
+        if reason:
+            message = "Your version is not supported" if self.window.device_manager.get_current_device_udid() else "Connect an iPhone"
+            caption.setText(QCoreApplication.translate("Nugget", message))
+        else:
+            caption.setText(QCoreApplication.translate("Nugget", "Custom keypad theme (.passthm)"))
+        self.passcode_theme_card.setAccessibleDescription(reason or "")
+        color = self._c.text_disabled if reason else self._c.text_secondary
+        caption.setStyleSheet(t("home_tile_subtitle") + f"color: {color};")
+        title.setStyleSheet(t("home_tile_title") +
+                           f"color: {self._c.text_disabled if reason else self._c.text_primary};")
+        icon.setPixmap(theme_pixmap(resource,
+            self._c.text_disabled if reason else self._c.text_primary,
+            self.TILE_ICON_PX, self.devicePixelRatioF()))
+
     def _refresh_storage(self):
+        # Also feeds the pre-apply warnings in MainWindow, so always collect
+        # the figures even while the storage card is not the active widget.
         if self._storage_thread is not None and self._storage_thread.isRunning():
             return
         udid = self.window.device_manager.get_current_device_udid()
@@ -576,8 +759,67 @@ class IOSHomePage(QWidget):
     def refresh_device_combo(self):
         self.populate_device_picker()
 
+    def _home_widget_mode(self) -> str:
+        try:
+            mode = self.window.settings.value("home_widget", "presets", type=str)
+        except Exception:
+            mode = "presets"
+        return mode if mode in ("storage", "presets", "both") else "presets"
+
+    def _apply_home_widget(self):
+        mode = self._home_widget_mode()
+        current = self.control_tabs.currentWidget()
+        self._presets_page.hide()
+        self._storage_page.hide()
+        self.control_tabs.blockSignals(True)
+        while self.control_tabs.count():
+            self.control_tabs.removeTab(0)
+        if self._developer_page is not None:
+            self.control_tabs.addTab(self._developer_page, QCoreApplication.translate("Nugget", "Developer"))
+        self.control_tabs.addTab(self._devices_page, QCoreApplication.translate("Nugget", "Devices"))
+        if mode in ("presets", "both"):
+            self.control_tabs.addTab(self._presets_page, QCoreApplication.translate("Nugget", "Presets"))
+        if mode in ("storage", "both"):
+            self.control_tabs.addTab(self._storage_page, QCoreApplication.translate("Nugget", "Device Storage"))
+        if current is not None and self.control_tabs.indexOf(current) >= 0:
+            self.control_tabs.setCurrentWidget(current)
+        # A preferred width, not a fixed one: the window is only 1000px wide,
+        # so the panel must give way to the logo + title instead of pushing
+        # the whole page into a horizontal scroll.
+        width = 640 if mode == "both" else 560
+        self.control_tabs.setMaximumWidth(width + (100 if self._developer_page is not None else 0))
+        self.control_tabs.blockSignals(False)
+
+    def _on_control_tab_changed(self, index):
+        if self.control_tabs.widget(index) is self._storage_page:
+            self._refresh_storage()
+
+    def set_home_widget(self, mode: str):
+        if mode not in ("storage", "presets", "both"):
+            return
+        self.window.settings.setValue("home_widget", mode)
+        self.window._sync_settings()
+        self._apply_home_widget()
+        selected = self._storage_page if mode == "storage" else self._presets_page
+        self.control_tabs.setCurrentWidget(selected)
+        if mode in ("presets", "both"):
+            self.refresh_preset_widget()
+        if mode in ("storage", "both"):
+            self._refresh_storage()
+
     def refresh_preset_widget(self):
-        self.preset_widget.refresh()
+        """Keep the top-bar preset card's subtitle in sync."""
+        try:
+            autosave = self.window.autosave_enabled()
+        except Exception:
+            autosave = True
+        name = self.window.settings.value("last_loaded_preset", "", type=str) or ""
+        if name:
+            self.presets_lbl.setText(name)
+        elif autosave:
+            self.presets_lbl.setText(QCoreApplication.translate("Nugget", "AutoSave"))
+        else:
+            self.presets_lbl.setText(QCoreApplication.translate("Nugget", "Manage presets"))
 
     def set_statusbar_visible(self, visible: bool):
         self.statusbar_card.setVisible(visible)
@@ -594,7 +836,7 @@ class IOSHomePage(QWidget):
         card_layout.setSpacing(12)
         card_layout.setAlignment(Qt.AlignHCenter)
 
-        icon_res = _FEATURE_ICONS.get(title, ":/icon/compass.svg")
+        icon_res = FEATURE_ICONS.get(title, ":/icon/compass.svg")
         icon_lbl = QLabel(card)
         icon_lbl.setFixedSize(self.TILE_ICON_PX, self.TILE_ICON_PX)
         icon_lbl.setAlignment(Qt.AlignCenter)
@@ -623,7 +865,6 @@ class IOSHomePage(QWidget):
 
         card.mousePressEvent = lambda e: self.switch_to_ios_page(page_index)
         card.setCursor(Qt.PointingHandCursor)
-        card.setToolTip(QCoreApplication.translate("Nugget", subtitle))
         return card
 
     def _paint_tile_icon(self, label: QLabel, icon_res: str):

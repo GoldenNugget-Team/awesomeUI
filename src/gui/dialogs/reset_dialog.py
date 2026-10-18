@@ -1,6 +1,12 @@
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QCheckBox, QVBoxLayout, QSizePolicy
+from PySide6.QtWidgets import (
+    QDialog, QDialogButtonBox, QLabel, QPushButton, QVBoxLayout,
+    QSizePolicy, QScrollArea, QWidget,
+)
+from PySide6.QtCore import QCoreApplication, QT_TRANSLATE_NOOP, Qt
+from src.gui.theme import ColorThemeManager, t
 
 from src.gui.pages.pages_list import Page, get_resettable_pages
+
 
 class ResetDialog(QDialog):
     def __init__(self, device_manager, apply_reset=lambda x: None, parent=None):
@@ -9,28 +15,68 @@ class ResetDialog(QDialog):
         self.apply_reset = apply_reset
         self.selected_pages: list[Page] = []
 
-        QBtn = (
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-        )
-
-        self.buttonBox = QDialogButtonBox(QBtn)
+        self.buttonBox = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
         self.buttonBox.accepted.connect(self.accept)
         self.buttonBox.rejected.connect(self.reject)
-        self.setWindowTitle(self.tr("Reset Page Tweaks"))
+        self.setWindowTitle(QCoreApplication.translate('Nugget', 'Restore Defaults'))
+        self.buttonBox.button(QDialogButtonBox.Ok).setText(QCoreApplication.translate('Nugget', 'Restore Defaults'))
+        self.buttonBox.button(QDialogButtonBox.Ok).setEnabled(False)
 
         layout = QVBoxLayout()
-        message = QLabel(self.tr("Select the pages you would like to reset."))
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+        title = QLabel(QCoreApplication.translate('Nugget', 'Restore Defaults'))
+        title.setObjectName('confirmTitle')
+        layout.addWidget(title)
+        message = QLabel(QCoreApplication.translate('Nugget',
+            'Select the sections whose original values you want to restore. Turning off a tweak only excludes it from the next apply.'))
+        message.setWordWrap(True)
         message.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout.addWidget(message)
 
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        content = QWidget()
+        rows = QVBoxLayout(content)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(10)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
         pages = get_resettable_pages(self.device_manager)
+        # getPageName() is plain English (the CLI shares it); translate it here.
+        page_names = (QT_TRANSLATE_NOOP("Nugget", "Status Bar"),
+                      QT_TRANSLATE_NOOP("Nugget", "Springboard"),
+                      QT_TRANSLATE_NOOP("Nugget", "Internal"),
+                      QT_TRANSLATE_NOOP("Nugget", "Daemons"))
         for page in pages:
-            pageChk = QCheckBox(page.getPageName())
-            pageChk.toggled.connect(lambda checked, p=page: self.toggle_page(checked, p))
-            layout.addWidget(pageChk)
+            label = QCoreApplication.translate("Nugget", page.getPageName())
+            page_button = QPushButton(label)
+            page_button.setObjectName('resetSelection')
+            page_button.setCheckable(True)
+            page_button.setMinimumHeight(60)
+            page_button.setCursor(Qt.PointingHandCursor)
+            page_button.toggled.connect(
+                lambda checked, button=page_button, name=label:
+                button.setText(('✓  ' if checked else '') + name))
+            page_button.toggled.connect(lambda checked, p=page: self.toggle_page(checked, p))
+            rows.addWidget(page_button)
 
+        rows.addStretch()
+        self.buttonBox.button(QDialogButtonBox.Cancel).setObjectName('cancelBtn')
+        for button in self.buttonBox.buttons():
+            button.setMinimumHeight(48)
+            button.setCursor(Qt.PointingHandCursor)
         layout.addWidget(self.buttonBox)
         self.setLayout(layout)
+        self.setMinimumWidth(520)
+        self.resize(560, 540)
+        self._retheme()
+        ColorThemeManager.instance().theme_changed.connect(self._retheme)
+
+    def _retheme(self):
+        self.setStyleSheet(t("confirm_dialog") + t("reset_dialog"))
 
     def toggle_page(self, checked: bool, page: Page):
         if checked:
@@ -38,11 +84,11 @@ class ResetDialog(QDialog):
         else:
             try:
                 self.selected_pages.remove(page)
-            except Exception:
+            except ValueError:
                 print("Page not found in list, ignoring error.")
+        self.buttonBox.button(QDialogButtonBox.Ok).setEnabled(bool(self.selected_pages))
 
     def accept(self):
         super().accept()
-        if len(self.selected_pages) > 0:
+        if self.selected_pages:
             self.apply_reset(self.selected_pages)
-        # otherwise, ignore

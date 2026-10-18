@@ -19,22 +19,22 @@ import asyncio
 import json
 import os
 
-from PySide6.QtCore import QCoreApplication, QThread, Signal
+from PySide6.QtCore import QCoreApplication, QThread, Signal, QSize
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QListWidget,
     QListWidgetItem, QPushButton, QFileDialog, QMessageBox,
 )
 
-from src.gui.theme import ColorThemeManager
-
-_NUGGET = "Nugget"
-
+from src.gui.theme import ColorThemeManager, theme_icon, t
+from src.gui.ios.components import IOSSearchField
 
 class FetchAppsThread(QThread):
     """Pull the installed-app list from the device on a background thread."""
 
     done = Signal(object)   # list[dict] sorted by display name
     failed = Signal(str)
+    icon_ready = Signal(str, bytes)
 
     def __init__(self, udid: str, parent=None):
         super().__init__(parent)
@@ -46,6 +46,7 @@ class FetchAppsThread(QThread):
         try:
             apps = loop.run_until_complete(self._fetch())
             self.done.emit(apps)
+            loop.run_until_complete(self._fetch_icons(apps))
         except Exception as e:
             self.failed.emit(str(e))
         finally:
@@ -74,6 +75,24 @@ class FetchAppsThread(QThread):
         apps.sort(key=lambda a: a["display_name"].lower())
         return apps
 
+    async def _fetch_icons(self, apps):
+        from src.devicemanagement.session import lockdown_session
+        from pymobiledevice3.services.springboard import SpringBoardServicesService
+        try:
+            async with lockdown_session(self.udid) as lockdown:
+                async with SpringBoardServicesService(lockdown) as service:
+                    for app in apps:
+                        if self.isInterruptionRequested():
+                            return
+                        try:
+                            data = await asyncio.wait_for(service.get_icon_pngdata(app['bundle_id']), 5)
+                        except Exception:
+                            return
+                        if data:
+                            self.icon_ready.emit(app['bundle_id'], data)
+        except Exception:
+            return
+
 
 class AppListExportDialog(QDialog):
     """Searchable picker of the apps installed on the connected iPhone.
@@ -84,10 +103,11 @@ class AppListExportDialog(QDialog):
 
     def __init__(self, window, parent=None):
         super().__init__(parent)
+        ColorThemeManager.instance().theme_changed.connect(self._retheme)
         self.window = window
         self.setWindowTitle(QCoreApplication.translate("Nugget", "Apps on iPhone"))
         self.setModal(True)
-        self.resize(520, 560)
+        self.resize(640, 660)
         self._apps: list[dict] = []
         self._thread = None
         self._selected: dict | None = None
@@ -96,17 +116,22 @@ class AppListExportDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
+        title = QLabel(QCoreApplication.translate("Nugget", "Apps on iPhone"), self)
+        title.setObjectName('appListTitle')
+        layout.addWidget(title)
         self.status_lbl = QLabel(QCoreApplication.translate("Nugget", "Loading installed apps..."), self)
         self.status_lbl.setWordWrap(True)
         layout.addWidget(self.status_lbl)
 
-        self.filter_input = QLineEdit(self)
+        self.filter_input = IOSSearchField(self)
         self.filter_input.setPlaceholderText(QCoreApplication.translate("Nugget", "Filter by name or bundle id..."))
         self.filter_input.textChanged.connect(self._apply_filter)
         self.filter_input.setVisible(False)
         layout.addWidget(self.filter_input)
 
         self.list_widget = QListWidget(self)
+        self.list_widget.setIconSize(QSize(52, 52))
+        self.list_widget.setSpacing(6)
         self.list_widget.currentItemChanged.connect(self._on_current_changed)
         self.list_widget.itemDoubleClicked.connect(lambda _item: self._add_selected())
         self.list_widget.setVisible(False)
@@ -124,11 +149,13 @@ class AppListExportDialog(QDialog):
         self.add_btn.clicked.connect(self._add_selected)
         btns.addWidget(self.add_btn)
         close_btn = QPushButton(QCoreApplication.translate("Nugget", "Close"), self)
+        close_btn.setObjectName("appListClose")
         close_btn.clicked.connect(self.reject)
         btns.addWidget(close_btn)
-        self._btn_box = btns
         layout.addLayout(btns)
 
+        for button in self.findChildren(QPushButton):
+            button.setMinimumHeight(46)
         self._retheme()
         self._start_fetch()
 
@@ -142,14 +169,16 @@ class AppListExportDialog(QDialog):
             self.status_lbl.setText(QCoreApplication.translate("Nugget", 
                 "No iPhone connected. Connect and unlock the device, then try again."))
             return
-        self._thread = FetchAppsThread(udid, parent=self)
+        self._thread = FetchAppsThread(udid, parent=QCoreApplication.instance())
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(self._fetch_finished)
+        self._thread.icon_ready.connect(self._on_icon)
         self._thread.done.connect(self._on_done)
         self._thread.failed.connect(self._on_failed)
         self._thread.start()
 
     def _on_done(self, apps: list[dict]):
         self._apps = apps
-        self._thread = None
         self.status_lbl.setText(QCoreApplication.translate("Nugget", 
             "{0} apps installed on the iPhone.").format(len(apps)))
         self.filter_input.setVisible(True)
@@ -158,7 +187,6 @@ class AppListExportDialog(QDialog):
         self._apply_filter()
 
     def _on_failed(self, error: str):
-        self._thread = None
         self.status_lbl.setText(QCoreApplication.translate("Nugget", 
             "Could not read the app list.\n\n{0}").format(error))
 
@@ -171,15 +199,41 @@ class AppListExportDialog(QDialog):
                 continue
             item = QListWidgetItem(
                 f"{app['display_name']}\n{app['bundle_id']}")
+            item.setSizeHint(QSize(0, 76))
+            data = app.get('icon_data')
+            pixmap = QPixmap()
+            if data:
+                pixmap.loadFromData(data)
+            icon = QIcon(pixmap) if not pixmap.isNull() else theme_icon(
+                ":/icon/app-indicator.svg", ColorThemeManager.instance().colors.text_secondary)
+            item.setIcon(icon)
             item.app = app
             self.list_widget.addItem(item)
         if self.list_widget.count():
             self.list_widget.setCurrentRow(0)
 
     def _on_current_changed(self, current, _previous):
+        self._selected = None
         self.add_btn.setEnabled(current is not None)
         if current is not None:
             self._selected = current.app
+
+    def _fetch_finished(self):
+        self._thread = None
+
+    def _on_icon(self, bundle_id, data):
+        for app in self._apps:
+            if app['bundle_id'] == bundle_id:
+                app['icon_data'] = data
+                break
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(data):
+            return
+        for index in range(self.list_widget.count()):
+            item = self.list_widget.item(index)
+            if item.app['bundle_id'] == bundle_id:
+                item.setIcon(QIcon(pixmap))
+                break
 
     def _add_selected(self):
         app = self._selected
@@ -222,49 +276,10 @@ class AppListExportDialog(QDialog):
         self.status_lbl.setText(QCoreApplication.translate("Nugget", 
             "Exported {0} apps to:\n{1}").format(len(payload), path))
 
-    def reject(self):
+    def done(self, result):
         if self._thread is not None and self._thread.isRunning():
-            self._thread.wait(5000)
-        self._thread = None
-        super().reject()
+            self._thread.requestInterruption()
+        super().done(result)
 
     def _retheme(self):
-        c = ColorThemeManager.instance().colors
-        self.setStyleSheet(f"""
-            QDialog {{ background-color: {c.bg_elevated}; }}
-            QLabel {{ color: {c.text_primary}; font-size: 14px; }}
-            QLineEdit {{
-                background-color: {c.bg_input};
-                border: none;
-                border-radius: 10px;
-                color: {c.text_primary};
-                font-size: 14px;
-                padding: 10px 12px;
-            }}
-            QListWidget {{
-                background-color: {c.bg_secondary};
-                border: none;
-                border-radius: 10px;
-                color: {c.text_primary};
-                font-size: 14px;
-                padding: 6px;
-            }}
-            QListWidget::item {{ padding: 8px 10px; border-radius: 8px; }}
-            QListWidget::item:selected {{ background-color: {c.accent}; color: {c.text_inverse}; }}
-            QPushButton {{
-                background-color: {c.accent};
-                border: none;
-                border-radius: 10px;
-                color: {c.text_inverse};
-                font-size: 14px;
-                font-weight: 600;
-                padding: 10px 16px;
-            }}
-            QPushButton:hover {{ background-color: {c.accent_hover}; }}
-            QPushButton:disabled {{ background-color: {c.scrollbar}; color: {c.text_disabled}; }}
-        """)
-        for i in range(self._btn_box.count()):
-            w = self._btn_box.itemAt(i).widget()
-            if isinstance(w, QPushButton) and w.text() == QCoreApplication.translate("Nugget", "Close"):
-                w.setStyleSheet(
-                    f"background-color: {c.surface_hover}; color: {c.text_primary};")
+        self.setStyleSheet(t("app_list_dialog"))

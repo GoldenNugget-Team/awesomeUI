@@ -18,8 +18,10 @@ import uuid
 from PySide6.QtCore import Qt, QCoreApplication, QTimer, QUrl, QStandardPaths, QByteArray, QSize
 from PySide6.QtGui import QPixmap, QMovie
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
+from src.gui.ios.components import IOSSearchField
+
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
     QScrollArea, QGridLayout, QPushButton, QWidget, QMessageBox,
     QProgressBar, QFrame,
 )
@@ -44,6 +46,7 @@ class _WallpaperCard(QFrame):
 
     def __init__(self, wallpaper, on_click, parent=None):
         super().__init__(parent)
+        ColorThemeManager.instance().theme_changed.connect(self._retheme)
         self.wallpaper = wallpaper
         self._on_click_cb = on_click
         self.setCursor(Qt.PointingHandCursor)
@@ -184,6 +187,7 @@ class WallpaperDownloaderDialog(QDialog):
 
     def __init__(self, window, parent=None):
         super().__init__(parent)
+        ColorThemeManager.instance().theme_changed.connect(self._retheme)
         self.window = window
         self.setWindowTitle(QCoreApplication.translate("Nugget", "Download Wallpapers"))
         self.setModal(True)
@@ -209,9 +213,8 @@ class WallpaperDownloaderDialog(QDialog):
         self.category_drp.currentTextChanged.connect(self._on_category_changed)
         top.addWidget(self.category_drp)
 
-        self.search_box = QLineEdit()
+        self.search_box = IOSSearchField()
         self.search_box.setPlaceholderText(QCoreApplication.translate("Nugget", "Search wallpapers..."))
-        self.search_box.setClearButtonEnabled(True)
         self.search_box.textChanged.connect(self._apply_search)
         top.addWidget(self.search_box, 1)
 
@@ -220,7 +223,7 @@ class WallpaperDownloaderDialog(QDialog):
         # Status / progress area
         c = ColorThemeManager.instance().colors
         self.status_lbl = QLabel(QCoreApplication.translate("Nugget", "Loading..."))
-        self.status_lbl.setStyleSheet(f"color: {c.text_secondary}; font-size: 13px;")
+        self.status_lbl.setStyleSheet(f"color: {c.text_secondary}; font-size: 13px; background-color: transparent;")
         layout.addWidget(self.status_lbl)
 
         self.progress = QProgressBar()

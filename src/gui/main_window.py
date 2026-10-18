@@ -1,6 +1,7 @@
+import sys
 from typing import TYPE_CHECKING
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QCoreApplication
 
 try:
@@ -46,9 +47,12 @@ from src.gui.ios.posterboard import IOSPosterboardPage
 from src.gui.ios.daemons import IOSDaemonsPage
 from src.gui.ios.apply import IOSApplyPage
 from src.gui.ios.settings import IOSSettingsPage
+from src.gui.ios.presets import IOSPresetsPage
 from src.gui.ios.statusbar import IOSStatusBarPage
 from src.gui.ios.icon_themes import IOSIconThemesPage
 from src.gui.ios.passcode_theme import IOSPasscodeThemePage
+from src.gui.ios.connect_placeholder import ConnectDevicePlaceholder
+from src.gui.thread_workers.apply_worker import DeviceMonitorThread
 from src.tweaks.registry import Section
 
 from src.gui.theme import ColorThemeManager, t, theme_icon, themed_stylesheet
@@ -75,6 +79,7 @@ _CLASSIC_THEMED_ICONS = {
     "liquidGlassPageBtn": ":/icon/liquid-glass.svg",
     "daemonsPageBtn": ":/icon/toggles.svg",
     "iconThemesPageBtn": ":/icon/brush.svg",
+    "presetsPageBtn": ":/icon/folder.svg",
     "applyPageBtn": ":/icon/check-circle.svg",
     "posterboardPageBtn": ":/icon/wallpaper.svg",
     "settingsPageBtn": ":/icon/gear.svg",
@@ -95,6 +100,8 @@ _CLASSIC_BORDERED_BTNS = [
 
 class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
                  NavigationMixin, ApplyMixin):
+    IOS_CONTENT_MAX_WIDTH = 1200
+
     def __init__(self, device_manager: "DeviceManager", translator: Translator):
         super(MainWindow, self).__init__()
         self.device_manager = device_manager
@@ -102,9 +109,22 @@ class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
         self.settings = self.translator.settings
         self.ui = Ui_Nugget()
         self.ui.setupUi(self)
+        # Designer pins the window to exactly 1000x600 (min == max). Keep that
+        # as the minimum, but let the user grow it: at 600px most pages scroll.
+        self.setMaximumSize(16777215, 16777215)  # QWIDGETSIZE_MAX
+        self.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
+                           QtWidgets.QSizePolicy.Preferred)
         self.noneText = self.tr("None")
         self.apply_in_progress = False
         self.refresh_in_progress = False
+        self._device_change_refresh_pending = False
+        self._device_refresh_timer = QtCore.QTimer(self)
+        self._device_refresh_timer.setSingleShot(True)
+        self._device_refresh_timer.timeout.connect(self._refresh_after_device_event)
+        # False until the first device scan resolves; the connect placeholder
+        # must not be shown while that scan is still running (the device list
+        # is empty then, even with a phone plugged in).
+        self.device_scan_completed = False
         self._cache_restore_in_progress = False
         self._cache_restore_thread = None
         self.threadpool = QtCore.QThreadPool()
@@ -149,7 +169,7 @@ class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
         # build the iOS-style pages stack
         # 0 = home, 1 = tweaks, 2 = posterboard, 3 = daemons, 4 = settings,
         # 5 = statusbar, 6 = apply, 7 = springboard, 8 = internal, 9 = liquidglass,
-        # 10 = icon themes, 11 = passcode themes
+        # 10 = icon themes, 11 = passcode themes, 12 = presets
         self.ios_pages = QtWidgets.QStackedWidget(self)
         self.ios_pages.setStyleSheet(t("page_bg"))
         self.ios_home = IOSHomePage(self)
@@ -157,6 +177,7 @@ class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
         self.ios_posterboard = IOSPosterboardPage(self)
         self.ios_daemons = IOSDaemonsPage(self)
         self.ios_settings = IOSSettingsPage(self)
+        self.ios_presets = IOSPresetsPage(self)
         self.ios_statusbar = IOSStatusBarPage(self)
         self.ios_apply = IOSApplyPage(self)
         self.ios_springboard = IOSSectionPage(self, Section.SPRINGBOARD)
@@ -176,6 +197,7 @@ class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
         self.ios_pages.addWidget(self.ios_liquidglass)
         self.ios_pages.addWidget(self.ios_iconthemes)
         self.ios_pages.addWidget(self.ios_passthemes)
+        self.ios_pages.addWidget(self.ios_presets)
 
         # Shared reusable header: one instance for every iOS subpage,
         # reconfigured on page change (title / back / right action).
@@ -193,22 +215,41 @@ class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
             8: QtCore.QCoreApplication.translate("Nugget", "Internal"),
             9: QtCore.QCoreApplication.translate("Nugget", "Liquid Glass"),
             10: QtCore.QCoreApplication.translate("Nugget", "Icon Themes"),
-            11: QCoreApplication.translate("Nugget", "Passcode Themes"),
+            11: QCoreApplication.translate("Nugget", "Passcode Theme"),
+            12: QCoreApplication.translate("Nugget", "Presets"),
         }
         self._nav_right_actions = {
-            2: ("+ Add Tendies", self.ios_posterboard.show_add_tendies_dialog),
-            10: (QtCore.QCoreApplication.translate("Nugget", "+ Add Icon"),
-                 self.ios_iconthemes.show_add_icon_dialog),
+            2: (QCoreApplication.translate("Nugget", "+ Add Tendies"), self.ios_posterboard.show_add_tendies_dialog),
             11: (QCoreApplication.translate("Nugget", "+ Theme"),
                  self.ios_passthemes.choose_theme_dialog),
         }
         self.ios_pages.currentChanged.connect(self._update_shared_nav)
 
         ios_root = QtWidgets.QWidget(self)
-        ios_root_layout = QtWidgets.QVBoxLayout(ios_root)
+        # The pages live in a centred column capped at IOS_CONTENT_MAX_WIDTH:
+        # on a wide window full-bleed rows put a switch a screen away from
+        # its label.
+        ios_root_hbox = QtWidgets.QHBoxLayout(ios_root)
+        ios_root_hbox.setContentsMargins(0, 0, 0, 0)
+        ios_root_hbox.setSpacing(0)
+        ios_column = QtWidgets.QWidget(ios_root)
+        ios_column.setMaximumWidth(self.IOS_CONTENT_MAX_WIDTH)
+        ios_root_hbox.addStretch(0)
+        ios_root_hbox.addWidget(ios_column, 1)
+        ios_root_hbox.addStretch(0)
+        ios_root_layout = QtWidgets.QVBoxLayout(ios_column)
         ios_root_layout.setContentsMargins(0, 0, 0, 0)
         ios_root_layout.setSpacing(0)
-        ios_root_layout.addWidget(self.ios_nav)
+        # Keep the shared navigation bar visually distinct from the page:
+        # the inset wrapper gives its rounded corners room to show against
+        # the surrounding dark surface.
+        nav_wrap = QtWidgets.QWidget(ios_column)
+        nav_wrap.setObjectName("iosNavWrap")
+        nav_wrap_layout = QtWidgets.QVBoxLayout(nav_wrap)
+        nav_wrap_layout.setContentsMargins(8, 8, 8, 0)
+        nav_wrap_layout.setSpacing(0)
+        nav_wrap_layout.addWidget(self.ios_nav)
+        ios_root_layout.addWidget(nav_wrap)
         ios_root_layout.addWidget(self.ios_pages)
 
         # Unified shell: classic sidebar + [classic home | iOS root | classic daemons].
@@ -229,6 +270,9 @@ class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
         self.content_stack.addWidget(self.ui.homePage)   # 0 = classic home
         self.content_stack.addWidget(ios_root)           # 1 = iOS pages
         self.content_stack.addWidget(self.ui.daemonsPage)  # 2 = classic daemons
+        # 3 = no-device placeholder (shown while no iPhone is connected)
+        self.connect_placeholder = ConnectDevicePlaceholder(self)
+        self.content_stack.addWidget(self.connect_placeholder)
         shell = QtWidgets.QWidget(self)
         shell.setProperty("cls", "central")  # picks up the global #1e1e1e background
         self.shell_layout = QtWidgets.QVBoxLayout(shell)
@@ -243,6 +287,20 @@ class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
         self.shell_layout.addLayout(self.body_row)
         self.setCentralWidget(shell)
 
+        # Presets are a first-class page, separate from Settings.  The
+        # generated Designer UI predates this page, so add its sidebar item
+        # here instead of editing the generated file.
+        self.ui.presetsPageBtn = QtWidgets.QToolButton(self.ui.sidebar)
+        self.ui.presetsPageBtn.setObjectName("presetsPageBtn")
+        self.ui.presetsPageBtn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.ui.presetsPageBtn.setIcon(QtGui.QIcon(":/icon/folder.svg"))
+        self.ui.presetsPageBtn.setText(QCoreApplication.translate("Nugget", "Presets"))
+        self.ui.presetsPageBtn.setCheckable(True)
+        self.ui.presetsPageBtn.setAutoExclusive(True)
+        self.ui.presetsPageBtn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.ui.presetsPageBtn.setProperty("cls", "sidebarBtn")
+        self.ui.verticalLayout.insertWidget(self.ui.verticalLayout.indexOf(self.ui.sidebarDiv2), self.ui.presetsPageBtn)
+
         self.apply_theme(self.theme_manager.current_theme)
 
         # Back navigation: ESC key and mouse back button go to the home page
@@ -253,10 +311,19 @@ class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
         self.pages[Page.Home].load()
         
         ## DEVICE BAR
-        self.refresh_devices()
-
         self.ui.refreshBtn.clicked.connect(self.refresh_devices)
+        self.ui.refreshBtn.setToolTip(QCoreApplication.translate("Nugget", "Refresh connected devices"))
         self.ui.devicePicker.currentIndexChanged.connect(self.change_selected_device)
+        self._device_monitor_thread = DeviceMonitorThread(self)
+        self._device_monitor_thread.devices_changed.connect(self.on_device_connection_changed)
+        self._device_monitor_thread.start()
+        self.refresh_devices()
+        # The refresh above runs on a worker thread, so the device list is still
+        # empty here. _update_device_gate() deliberately does NOT show the
+        # connect placeholder until that first scan finishes — otherwise the
+        # "No device connected" screen stayed up for the whole scan (seconds)
+        # even when a supported phone was already plugged in.
+        self._update_device_gate()
 
         ## SIDE BAR ACTIONS
         self.ui.homePageBtn.clicked.connect(self.on_homePageBtn_clicked)
@@ -269,6 +336,8 @@ class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
         self.ui.posterboardPageBtn.clicked.connect(self.on_posterboardPageBtn_clicked)
         self.ui.applyPageBtn.clicked.connect(self.on_applyPageBtn_clicked)
         self.ui.settingsPageBtn.clicked.connect(self.on_settingsPageBtn_clicked)
+
+        self.ui.presetsPageBtn.clicked.connect(self.on_presetsPageBtn_clicked)
 
         # Apply the initial themed global stylesheet
         self._apply_global_stylesheet()
@@ -286,6 +355,15 @@ class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
             self.theme_manager.save_theme(ThemeManager.IOS)
             self.apply_theme(ThemeManager.IOS)
 
+        # First launch: choose the home top-bar widget (storage vs presets).
+        if not self.settings.contains("home_widget"):
+            from src.gui.interface_picker import HomeWidgetPickerDialog
+            picker = HomeWidgetPickerDialog(self)
+            picker.exec()
+            self.settings.setValue("home_widget", picker.choice or "presets")
+            self._sync_settings()
+            self.ios_home.set_home_widget(picker.choice or "presets")
+
         # First launch: remind the user to back up the device before tweaking
         # (keeps asking until they confirm a backup was made)
         if not self.settings.value("backup_prompt_done", False, type=bool):
@@ -293,17 +371,25 @@ class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
                 self.settings.setValue("backup_prompt_done", True)
                 self._sync_settings()
 
+        # Linux: usbmuxd / libimobiledevice are required to see an iPhone.
+        # Offer to install them (the system asks for the password).
+        if "--test-mode" not in sys.argv:
+            from src.gui.dialogs.linux_deps_dialog import prompt_and_install, should_prompt_on_startup
+            if should_prompt_on_startup(self):
+                prompt_and_install(self, from_startup=True)
+
     # ---- Color theme reactivity ------------------------------------------
 
     def _apply_global_stylesheet(self):
         """Re-apply the global stylesheet using the current color theme."""
         self.setStyleSheet(t("global"))
+        self._applied_color_mode = self._color_theme.mode
         # Also update the QPalette so native widgets pick up the colors
-        QtWidgets.QApplication.instance().setPalette(self._color_theme.build_palette())
+        self._color_theme.apply_to_app()
         # Re-style the ios_pages stack
         self.ios_pages.setStyleSheet(t("page_bg"))
-        # Re-style the classic chrome (sidebar icons, device bar, home toolbar)
-        self._retheme_classic()
+        if self.theme_manager.current_theme == ThemeManager.CLASSIC:
+            self._retheme_classic()
 
     def _retheme_classic(self):
         """Re-color the classic shell: chrome icons, device picker, version
@@ -335,6 +421,10 @@ class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
                 color: {c.text_primary};
                 background-color: {c.surface_hover};
             }}
+            QToolButton:checked {{
+                color: {c.text_inverse};
+                background-color: {c.accent};
+            }}
             QLabel {{ color: {c.text_primary}; }}
         """
         self.ui.sidebar.setStyleSheet(chrome)
@@ -348,12 +438,15 @@ class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
 
     def _on_color_theme_changed(self):
         """Called when the color theme (dark/light or accent) changes."""
-        self._apply_global_stylesheet()
-        # Force re-render of all iOS page stylesheets by re-applying them
-        for i in range(self.ios_pages.count()):
-            page = self.ios_pages.widget(i)
-            if page and hasattr(page, '_retheme'):
-                page._retheme()
+        if self.theme_manager.current_theme == ThemeManager.CLASSIC:
+            self._apply_global_stylesheet()
+            return
+        if getattr(self, '_applied_color_mode', None) != self._color_theme.mode:
+            self._apply_global_stylesheet()
+        page = self.ios_pages.currentWidget()
+        if page is not None and hasattr(page, "_retheme"):
+            page._retheme()
+            page._applied_theme_revision = self._color_theme.revision
 
     def closeEvent(self, event):
         """Guard window close so device threads never get destroyed mid-run.
@@ -366,16 +459,16 @@ class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
         """
         terminating = []
         if getattr(self, "apply_in_progress", False):
-            terminating.append("apply/reset")
+            terminating.append(QCoreApplication.translate("Nugget", "apply/reset"))
         if getattr(self, "_cache_restore_in_progress", False):
-            terminating.append("data restore")
+            terminating.append(QCoreApplication.translate("Nugget", "data restore"))
         pt_worker = getattr(getattr(self, "ios_passthemes", None), "_worker", None)
         if _still_running(pt_worker):
-            terminating.append("passcode theme write")
+            terminating.append(QCoreApplication.translate("Nugget", "passcode theme write"))
         pairing_worker = getattr(
             getattr(self, "ios_settings", None), "_reset_pairing_thread", None)
         if _still_running(pairing_worker):
-            terminating.append("pairing reset")
+            terminating.append(QCoreApplication.translate("Nugget", "pairing reset"))
         if terminating:
             reply = QtWidgets.QMessageBox.question(
                 self,
@@ -410,6 +503,13 @@ class MainWindow(QtWidgets.QMainWindow, DeviceBarMixin, SettingsMixin,
         if _still_running(scan_worker):
             try:
                 scan_worker.wait(8000)
+            except RuntimeError:
+                pass
+        monitor_worker = getattr(self, "_device_monitor_thread", None)
+        if _still_running(monitor_worker):
+            monitor_worker.request_stop()
+            try:
+                monitor_worker.wait(10000)
             except RuntimeError:
                 pass
         super().closeEvent(event)

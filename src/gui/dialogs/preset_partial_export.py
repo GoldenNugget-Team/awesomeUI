@@ -25,7 +25,7 @@ def _label_for(tweak_id: TweakID) -> str:
         TweakID.Templates: QCoreApplication.translate("Nugget", "Templates"),
         TweakID.Daemons: QCoreApplication.translate("Nugget", "Daemons"),
         TweakID.ClearScreenTimeAgentPlist: QCoreApplication.translate(
-            "Nugget", "Clear Screen Time Agent"),
+            "Nugget", "Clear ScreenTimeAgent.plist file"),
     }
     return labels.get(tweak_id, tweak_id.name)
 

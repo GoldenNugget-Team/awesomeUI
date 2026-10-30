@@ -15,6 +15,32 @@ FONT_FAMILY = "Inter Variable"
 
 
 STYLES = {
+    "templates_builder_title": "font-size: 16px; font-weight: 600; color: {text_primary}; background-color: transparent;",
+    "templates_caption": "font-size: 12px; color: {text_secondary}; background-color: transparent;",
+    "templates_builder_icon": "background-color: {accent}; border-radius: 12px; font-size: 24px; color: {text_inverse};",
+    "templates_builder_chevron": "font-size: 26px; color: {text_secondary}; background-color: transparent;",
+    "tweak_row_description": "color: {text_secondary}; font-size: 13px; background-color: transparent;",
+    "tweak_row_label": "color: {text_primary}; font-size: 15px; background-color: transparent;",
+    "onboarding_dialog": """
+        QDialog {{ background-color: {bg_primary}; }}
+        QLabel {{ color: {text_primary}; background-color: transparent; border: none; }}
+    """,
+    "onboarding_title": "font-size: 24px; font-weight: 700; color: {text_primary}; background-color: transparent;",
+    "onboarding_description": "font-size: 13px; color: {text_secondary}; background-color: transparent; border: none;",
+    "onboarding_option_title": "font-size: 18px; font-weight: 600; color: {text_primary}; background-color: transparent; border: none;",
+    "onboarding_preview": "background-color: transparent; border: none;",
+    "onboarding_badge": "color: {accent}; background-color: transparent; border: none; font-size: 11px; font-weight: 700;",
+    "onboarding_choice": """
+        QPushButton#interfaceChoice {{ background-color: {bg_secondary}; border: 2px solid {border}; border-radius: 16px; text-align: left; }}
+        QPushButton#interfaceChoice:hover {{ background-color: {surface_hover}; }}
+        QPushButton#interfaceChoice:checked {{ border-color: {accent}; }}
+        QPushButton#interfaceChoice:focus {{ border-color: {accent}; }}
+    """,
+    "onboarding_continue": """
+        QPushButton {{ background-color: {accent}; color: {text_inverse}; border: none; border-radius: 10px; padding: 12px 22px; font-size: 14px; font-weight: 600; }}
+        QPushButton:hover {{ background-color: {accent_hover}; }}
+        QPushButton:focus {{ border: 2px solid {text_primary}; padding: 10px 20px; }}
+    """,
     "accent_swatch": """
         QPushButton {{ background-color: {swatch}; border-radius: 16px;
                        border: 3px solid transparent; }}
@@ -52,15 +78,29 @@ STYLES = {
     "number_input_dialog": """
         QDialog {{ background-color: {bg_elevated}; }}
         QLabel {{ color: {text_primary}; font-size: 15px; }}
-        QSpinBox {{
+        QSpinBox, QDoubleSpinBox {{
             background-color: {bg_input};
-            border: none;
+            border: 1px solid {border};
             border-radius: 10px;
             color: {text_primary};
             font-size: 15px;
-            padding: 12px 16px;
+            padding: 10px 14px;
         }}
-        QSpinBox::up-button, QSpinBox::down-button {{ width: 0; }}
+        QSpinBox:focus, QDoubleSpinBox:focus {{ border-color: {accent}; }}
+        QSpinBox QLineEdit, QDoubleSpinBox QLineEdit {{
+            background: transparent;
+            border: none;
+            border-radius: 0;
+            color: {text_primary};
+            font-size: 15px;
+            padding: 0;
+            margin: 0;
+            min-height: 0;
+            selection-background-color: {accent};
+            selection-color: {text_inverse};
+        }}
+        QSpinBox::up-button, QSpinBox::down-button,
+        QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width: 0; }}
         QPushButton {{
             background-color: {accent};
             border-radius: 10px;
@@ -99,6 +139,7 @@ STYLES = {
         }}
         QPushButton#iosCollapsibleHeader:hover {{ background: transparent; }}
         QPushButton#iosCollapsibleHeader:checked {{ color: {text_primary}; }}
+        QPushButton#iosCollapsibleHeader:focus {{ color: {accent}; }}
     """,
 
     "card": """
@@ -268,13 +309,14 @@ STYLES = {
     """,
 
     "support_panel": """
-            QLabel#supportTitle {{ color: {text_primary}; font-size: 19px; font-weight: 600; }}
-            QLabel#supportMuted {{ color: {text_secondary}; font-size: 12px; }}
-            QLabel#supportCredit {{ color: {text_primary}; font-size: 13px; }}
+            QLabel#supportTitle {{ color: {text_primary}; background: transparent; font-size: 19px; font-weight: 600; }}
+            QLabel#supportMuted {{ color: {text_secondary}; background: transparent; font-size: 12px; }}
+            QLabel#supportCredit {{ color: {text_primary}; background: transparent; font-size: 13px; }}
             QToolButton#supportLink {{ background: {bg_tertiary}; border: 1px solid {border}; border-radius: 14px; }}
             QToolButton#supportLink:hover {{ border-color: {accent}; background: {surface_hover}; }}
+            QWidget#supportProfile {{ background: transparent; border: none; }}
             QToolButton#supportAvatar {{ background: transparent; border: none; padding: 2px; }}
-            QPushButton#supportName {{ background: transparent; color: {text_primary}; font-size: 15px; font-weight: 600; border: none; padding: 5px; }}
+            QPushButton#supportName {{ background: transparent; color: {text_primary}; font-size: 17px; font-weight: 600; border: none; padding: 5px; }}
             QPushButton#supportName:hover {{ color: {accent}; }}
             """,
 
@@ -663,7 +705,7 @@ STYLES = {
     """,
 
     # ---- Home ------------------------------------------------------------
-    "home_title": "font-size: 32px; font-weight: 700; color: {text_primary};",
+    "home_title": "font-size: 32px; font-weight: 700; color: {text_primary}; background-color: transparent;",
     "home_subtitle": "color: {text_secondary}; font-size: 13px; font-weight: 500; background: transparent;",
 
     "home_combo": """

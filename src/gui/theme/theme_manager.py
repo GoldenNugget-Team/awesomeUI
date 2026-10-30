@@ -1,21 +1,15 @@
 from PySide6.QtCore import QObject, Signal, QSettings, QEvent, Qt
 from PySide6.QtGui import QColor, QPalette, QGuiApplication
 
-from src.gui.theme.colors import ThemeColors, DARK, LIGHT, ACCENT_PRESETS, LIGHT_ACCENT_PRESETS
-
-
-# TEMP: the light/dark selector is hidden in Settings, so nobody could leave a
-# light mode saved earlier. Until it comes back, every start uses dark; the saved
-# choice is kept untouched. Set to True when the selector is restored.
-LIGHT_MODE_AVAILABLE = False
+from src.gui.theme.colors import ThemeColors, DARK, ACCENT_PRESETS
 
 
 class ColorThemeManager(QObject):
-    """Manages the persisted light/dark theme and independent accent choice.
+    """Manages the persisted accent color for the single application palette.
 
     Singleton accessed via ``ColorThemeManager.instance()``.
-    Emits ``theme_changed`` whenever the palette or accent changes so
-    connected widgets can re-render their stylesheets.
+    Emits ``theme_changed`` whenever the accent (or the resulting palette)
+    changes so connected widgets can re-render their stylesheets.
     """
 
     theme_changed = Signal()
@@ -25,11 +19,9 @@ class ColorThemeManager(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._settings = QSettings("GoldenNugget", "GoldenNugget")
-        self._mode = self._settings.value("color_mode", "dark")
-        if self._mode not in ('dark', 'light') or not LIGHT_MODE_AVAILABLE:
-            self._mode = 'dark'
         self._accent_name = self._settings.value("accent_color", "blue")
-        if self._accent_name not in ACCENT_PRESETS:
+        self._custom_accent = self._settings.value('liquid/custom_accent', '#cfa55d')
+        if self._accent_name not in ACCENT_PRESETS and self._accent_name != 'custom':
             self._accent_name = 'blue'
         self._colors = self._build_colors()
         self._revision = 0
@@ -52,29 +44,14 @@ class ColorThemeManager(QObject):
         return self._revision
 
     @property
-    def mode(self) -> str:
-        return self._mode
-
-    @property
-    def is_dark(self) -> bool:
-        return self._mode == 'dark'
-
-    @property
     def accent_name(self) -> str:
         return self._accent_name
 
     def c(self, slot: str) -> str:
-        """Shortcut: return the hex value for *slot* from the active palette."""
+        """Shortcut: return the hex value for *slot* from the palette."""
         return getattr(self._colors, slot)
 
     # ---- switching -------------------------------------------------------
-
-    def set_mode(self, mode: str):
-        if mode not in ('dark', 'light') or mode == self._mode:
-            return
-        self._mode = mode
-        self._settings.setValue('color_mode', mode)
-        self._publish_colors()
 
     def set_accent(self, name: str):
         if name not in ACCENT_PRESETS:
@@ -83,6 +60,18 @@ class ColorThemeManager(QObject):
             return
         self._accent_name = name
         self._settings.setValue("accent_color", name)
+        self._publish_colors()
+
+    def set_custom_accent(self, value: str):
+        color = QColor(value)
+        if not color.isValid():
+            return
+        if self._accent_name == 'custom' and self._custom_accent == color.name():
+            return
+        self._custom_accent = color.name()
+        self._accent_name = 'custom'
+        self._settings.setValue('liquid/custom_accent', self._custom_accent)
+        self._settings.setValue('accent_color', 'custom')
         self._publish_colors()
 
     def _publish_colors(self):
@@ -95,14 +84,13 @@ class ColorThemeManager(QObject):
     # ---- keeping the OS out ----------------------------------------------
 
     def apply_to_app(self, app=None):
-        """Apply the palette and pin Qt's colour scheme to the saved mode.
+        """Apply the palette and pin Qt's colour scheme to dark.
 
         The app never follows the OS appearance. Without the pin, Qt hands
         native parts (Windows/macOS title bars, system dialogs) to the OS
         scheme and re-resolves the palette when the OS switches between
-        light and dark. Pinning keeps them on the user's choice (dark unless
-        they picked light); if a platform still reports a different scheme,
-        the palette and pin are applied again.
+        light and dark. Pinning keeps them dark; if a platform still reports
+        a different scheme, the palette and pin are applied again.
         """
         app = app or self._pinned_app or QGuiApplication.instance()
         if app is None:
@@ -117,7 +105,7 @@ class ColorThemeManager(QObject):
                 hints.colorSchemeChanged.connect(self._on_system_scheme)
 
     def _qt_scheme(self):
-        return Qt.ColorScheme.Dark if self.is_dark else Qt.ColorScheme.Light
+        return Qt.ColorScheme.Dark
 
     def _on_system_scheme(self, scheme):
         # Only the live singleton answers; a replaced manager (tests, reloads)
@@ -169,10 +157,12 @@ class ColorThemeManager(QObject):
     # ---- helpers ---------------------------------------------------------
 
     def _build_colors(self) -> ThemeColors:
-        palette = DARK if self.is_dark else LIGHT
-        presets = ACCENT_PRESETS if self.is_dark else LIGHT_ACCENT_PRESETS
-        accent, hover, pressed = presets[self._accent_name]
-        return palette.with_accent(accent, hover, pressed)
+        if self._accent_name == 'custom':
+            color = QColor(self._custom_accent)
+            accent, hover, pressed = color.name(), color.lighter(115).name(), color.darker(115).name()
+        else:
+            accent, hover, pressed = ACCENT_PRESETS[self._accent_name]
+        return DARK.with_accent(accent, hover, pressed)
 
     def accent_hex(self) -> str:
         """Return the current accent as a ``"#rrggbb"`` string."""

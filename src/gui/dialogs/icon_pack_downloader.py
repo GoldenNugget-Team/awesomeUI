@@ -12,12 +12,13 @@ responsive and there are no background ``QThread`` lifetime issues.
 
 import os
 import tempfile
+from collections import deque
 
-from PySide6.QtCore import Qt, QCoreApplication, QUrl, QSize
+from PySide6.QtCore import Qt, QCoreApplication, QUrl, QTimer, QStandardPaths
 from PySide6.QtGui import QPixmap
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply, QNetworkDiskCache
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QDialog, QVBoxLayout, QLabel, QPushButton,
     QScrollArea, QGridLayout, QWidget, QFrame,
 )
 
@@ -148,9 +149,6 @@ class IconPackDownloaderDialog(QDialog):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.grid_host = QWidget()
-        self.grid = QGridLayout(self.grid_host)
-        self.grid.setContentsMargins(4, 4, 4, 4)
-        self.grid.setSpacing(10)
         self.scroll.setWidget(self.grid_host)
         layout.addWidget(self.scroll, 1)
 
@@ -160,9 +158,19 @@ class IconPackDownloaderDialog(QDialog):
         layout.addWidget(close_btn)
 
         self._nam = QNetworkAccessManager(self)
+        cache = QNetworkDiskCache(self._nam)
+        cache.setCacheDirectory(os.path.join(QStandardPaths.writableLocation(QStandardPaths.CacheLocation), "icon_previews"))
+        cache.setMaximumCacheSize(64 * 1024 * 1024)
+        self._nam.setCache(cache)
         self._catalog_reply = None
         self._preview_replies = []
-        self._preview_queue = []
+        self._preview_queue = deque()
+        self._themes = []
+        self._card_indices = {}
+        self._updating_visible = False
+        self._download_file = None
+        self._download_error = None
+        self.scroll.verticalScrollBar().valueChanged.connect(self._update_visible_cards)
         self._download_reply = None
         self._downloading_theme = None
         self._downloading = False
@@ -221,19 +229,57 @@ class IconPackDownloaderDialog(QDialog):
         self._populate(themes)
 
     def _populate(self, themes):
-        # clear previous cards
-        while self.grid.count():
-            item = self.grid.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
+        self._themes = list(themes)
+        self._preview_queue.clear()
+        for card in self._cards:
+            card.deleteLater()
         self._cards = []
-        cols = max(1, (self.width() - 32) // (CARD_W + 10))
-        for i, theme in enumerate(themes):
-            card = _ThemeCard(theme, self._on_card_click)
-            self.grid.addWidget(card, i // cols, i % cols)
-            self._cards.append(card)
-            self._enqueue_preview(card)
+        self._card_indices = {}
+        for reply, _ in list(self._preview_replies):
+            reply.abort()
+        if not self._themes:
+            self.grid_host.setMinimumHeight(0)
+        self._update_visible_cards()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._update_visible_cards)
+
+    def _update_visible_cards(self, *_):
+        if not getattr(self, "_themes", None) or self._updating_visible:
+            return
+        self._updating_visible = True
+        try:
+            viewport = self.scroll.viewport()
+            cols = max(1, (viewport.width() - 8) // (CARD_W + 10))
+            rows = (len(self._themes) + cols - 1) // cols
+            row_height = CARD_H + 10
+            self.grid_host.setMinimumHeight(rows * row_height + 8)
+            start_row = max(0, self.scroll.verticalScrollBar().value() // row_height - 1)
+            end_row = min(rows, (self.scroll.verticalScrollBar().value() + viewport.height()) // row_height + 3)
+            wanted = set(range(start_row * cols, min(len(self._themes), end_row * cols)))
+            self._preview_queue = deque(card for card in self._preview_queue
+                                        if card in self._cards and self._card_indices.get(card) in wanted)
+            for card in list(self._cards):
+                if self._card_indices[card] not in wanted:
+                    self._cards.remove(card)
+                    self._card_indices.pop(card)
+                    for reply, owner in list(self._preview_replies):
+                        if owner is card:
+                            reply.abort()
+                    card.deleteLater()
+            present = set(self._card_indices.values())
+            for index in sorted(wanted):
+                if index not in present:
+                    card = _ThemeCard(self._themes[index], self._on_card_click, self.grid_host)
+                    self._cards.append(card)
+                    self._card_indices[card] = index
+                    self._enqueue_preview(card)
+            for card, index in self._card_indices.items():
+                card.move(4 + index % cols * (CARD_W + 10), 4 + index // cols * row_height)
+                card.show()
+        finally:
+            self._updating_visible = False
         self._drain_preview_queue()
 
     # --- previews ---
@@ -244,8 +290,13 @@ class IconPackDownloaderDialog(QDialog):
 
     def _drain_preview_queue(self):
         while self._preview_queue and len(self._preview_replies) < PREVIEW_CONCURRENCY:
-            card = self._preview_queue.pop(0)
-            reply = self._nam.get(QNetworkRequest(QUrl(card.theme.preview_url)))
+            card = self._preview_queue.popleft()
+            if card not in self._cards:
+                continue
+            request = QNetworkRequest(QUrl(card.theme.preview_url))
+            request.setAttribute(QNetworkRequest.Attribute.CacheLoadControlAttribute,
+                                 QNetworkRequest.CacheLoadControl.PreferCache)
+            reply = self._nam.get(request)
             self._preview_replies.append((reply, card))
             reply.finished.connect(lambda r=reply, c=card: self._on_preview_reply(r, c))
 
@@ -254,7 +305,7 @@ class IconPackDownloaderDialog(QDialog):
             self._preview_replies.remove((reply, card))
         data = bytes(reply.readAll())
         reply.deleteLater()
-        if data:
+        if data and card in self._cards:
             card.set_preview(data)
         self._drain_preview_queue()
 
@@ -282,55 +333,64 @@ class IconPackDownloaderDialog(QDialog):
         self._downloading_theme = theme
         self.status_lbl.setText(QCoreApplication.translate(
             "Nugget", "Downloading \"{0}\"...").format(theme.name))
-        self._download_reply = self._nam.get(
-            QNetworkRequest(QUrl(theme.download_url)))
+        self._download_error = None
+        self._download_file = tempfile.NamedTemporaryFile(prefix="icontheme_dl_", suffix=".zip", delete=False)
+        self._download_reply = self._nam.get(QNetworkRequest(QUrl(theme.download_url)))
+        self._download_reply.readyRead.connect(self._drain_download)
         self._download_reply.finished.connect(self._on_download_reply)
+
+    def _drain_download(self):
+        if self._download_reply is None or self._download_file is None:
+            return
+        try:
+            self._download_file.write(bytes(self._download_reply.readAll()))
+        except OSError as error:
+            self._download_error = error
+            self._download_reply.abort()
 
     def _on_download_reply(self):
         reply = self._download_reply
-        self._download_reply = None
-        self._downloading = False
         if reply is None:
             return
-        data = bytes(reply.readAll())
-        err = reply.error()
+        self._drain_download()
+        self._download_reply = None
+        output, self._download_file = self._download_file, None
+        theme, self._downloading_theme = self._downloading_theme, None
+        error = reply.error()
         reply.deleteLater()
-        theme = self._downloading_theme
-        self._downloading_theme = None
-        if err != QNetworkReply.NetworkError.NoError or not data:
-            self.status_lbl.setText(QCoreApplication.translate(
-                "Nugget", "Download failed for \"{0}\".").format(theme.name if theme else ""))
+        self._downloading = False
+        if output is None:
             return
+        path = output.name
         try:
-            added, skipped = self._import_zip_bytes(data, theme)
-        except Exception as e:
+            output.close()
+            if error != QNetworkReply.NetworkError.NoError or self._download_error is not None:
+                raise self._download_error or RuntimeError("Download failed")
+            from src.gui.dialogs.file_task import run_file_task
+            tweak = tweaks[TweakID.IconThemes]
+            added, skipped = run_file_task(self,
+                QCoreApplication.translate("Nugget", "Import Icon Pack"),
+                lambda: tweak.import_pack_zip(path, theme_name=theme.name if theme else None))
+            if added == 0:
+                raise RuntimeError("no icons found in archive")
+            tweak.set_enabled(True)
+        except Exception as exc:
             self.status_lbl.setText(QCoreApplication.translate(
-                "Nugget", "Could not import \"{0}\": {1}").format(
-                    theme.name if theme else "", e))
+                "Nugget", "Could not import \"{0}\": {1}").format(theme.name if theme else "", exc))
             return
-        self.added_bundle_ids.extend([theme.name] * added)
-        msg = QCoreApplication.translate(
-            "Nugget", "Imported {0} icons from \"{1}\".").format(added, theme.name if theme else "")
-        if skipped:
-            msg += " " + QCoreApplication.translate(
-                "Nugget", "({0} bundles skipped — missing icon files).").format(len(skipped))
-        self.status_lbl.setText(msg)
-
-    def _import_zip_bytes(self, data: bytes, theme):
-        """Write the zip to a temp file and let the tweak import it."""
-        tweak = tweaks[TweakID.IconThemes]
-        fd, path = tempfile.mkstemp(prefix="icontheme_dl_", suffix=".zip")
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-            added, skipped = tweak.import_pack_zip(path, theme_name=theme.name if theme else None)
-            if added:
-                tweak.set_enabled(True)
         finally:
             try:
                 os.remove(path)
-            except OSError:
+            except FileNotFoundError:
                 pass
-        if added == 0:
-            raise RuntimeError("no icons found in archive")
-        return added, skipped
+        self.added_bundle_ids.extend([theme.name] * added)
+        msg = QCoreApplication.translate("Nugget", "Imported {0} icons from \"{1}\".").format(added, theme.name if theme else "")
+        if skipped:
+            msg += " " + QCoreApplication.translate("Nugget", "({0} bundles skipped — missing icon files).").format(len(skipped))
+        self.status_lbl.setText(msg)
+
+    def done(self, result):
+        if self._download_reply is not None:
+            self._download_error = RuntimeError("Download cancelled")
+            self._download_reply.abort()
+        super().done(result)

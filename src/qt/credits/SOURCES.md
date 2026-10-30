@@ -9,3 +9,9 @@ locally so opening the app does not request profile images from Discord.
 - `LeminLimez.png`: existing GoldenNugget credit artwork, retained for Nugget's creator.
 
 Retrieved October 15, 2026. Profile artwork remains attributable to its original owners.
+
+`awesomenull.png` and `windows11aero.png` are PNG conversions of the original
+WebP files above, with the same decoded pixels. The UI uses PNG so packaged
+builds do not need the optional Qt WebP decoder for profile images. Rebuild Qt
+resources with `pyside6-rcc --compress-algo zlib src/qt/resources.qrc -o
+src/qt/resources_rc.py`; Zstd resources fail on Qt builds without Zstd support.

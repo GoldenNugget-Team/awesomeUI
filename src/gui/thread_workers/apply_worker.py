@@ -15,6 +15,7 @@ import threading
 # to the same class the backend uses).
 from src.utils.alerts import ApplyAlertMessage
 from src.exceptions.nugget_exception import NuggetException
+from src.restore.find_my_wait import FindMyWaitControl, ApplyCancelledError, current_find_my_wait
 
 
 class _SudoState:
@@ -63,11 +64,14 @@ class ApplyThread(QThread):
     def __init__(self, manager, settings: QSettings, reset_pages=None):
         super().__init__()
         self.manager = manager
+        self.find_my_wait = FindMyWaitControl()
         self.settings = settings
         self.reset_pages = reset_pages
         self.success = False
         self._error_msg: str = ""
         self.error_alert_sent = False
+        from src.restore.pause_control import RestorePauseControl
+        self.pause_control = RestorePauseControl(on_resume=self.manager._restore_eta.reset)
 
     def prompt_password(self, title: str, label: str) -> Optional[str]:
         # Modal dialogs must be built on the main thread (macOS raises
@@ -120,8 +124,16 @@ class ApplyThread(QThread):
             self._error_msg = ""
             log_context(f"FINISH {mode} OK")
             from src.controllers.apply_history import record_operation
-            record_operation(self.manager, mode, True)
+            record_operation(self.manager, mode, True, reset_pages=self.reset_pages)
             self.finished_with_result.emit(True, "")
+        except ApplyCancelledError as e:
+            self.success = False
+            self._error_msg = str(e)
+            self.error_alert_sent = True
+            self._log.info("%s cancelled while waiting for Find My", mode)
+            from src.controllers.apply_history import record_operation
+            record_operation(self.manager, mode, False, self._error_msg)
+            self.finished_with_result.emit(False, self._error_msg)
         except Exception as e:
             self.success = False
             self._error_msg = f"{type(e).__name__}: {e}"
@@ -174,6 +186,9 @@ class ApplyThread(QThread):
         self.alert.emit(msg)
 
     def _do_work(self):
+        from src.restore.pause_control import current_pause_control
+        pause_token = current_pause_control.set(self.pause_control)
+        find_my_token = current_find_my_wait.set(self.find_my_wait)
         self.manager.operation_stage_callback = self.operation_stage.emit
         try:
             if self.reset_pages is None:
@@ -183,6 +198,10 @@ class ApplyThread(QThread):
                                              self.alert_window, self.prompt_user_choice)
         finally:
             self.manager.operation_stage_callback = None
+            self.pause_control.finish()
+            current_pause_control.reset(pause_token)
+            self.find_my_wait.finish()
+            current_find_my_wait.reset(find_my_token)
 
 
 class RestoreCacheThread(QThread):
@@ -207,6 +226,7 @@ class RestoreCacheThread(QThread):
     def __init__(self, manager):
         super().__init__()
         self.manager = manager
+        self.find_my_wait = FindMyWaitControl()
         self._eta = None
 
     def prompt_user_choice(self, title: str, text: str) -> str:
@@ -239,6 +259,9 @@ class RestoreCacheThread(QThread):
             self._do_work()
             log_context("FINISH restore-cache OK")
             self.finished_with_result.emit(True, "")
+        except ApplyCancelledError as e:
+            log.info("Restore cancelled while waiting for Find My")
+            self.finished_with_result.emit(False, str(e))
         except Exception as e:
             traceback_str = traceback.format_exc()
             log.error("restore-cache failed: %s\n%s", e, traceback_str)
@@ -253,21 +276,23 @@ class RestoreCacheThread(QThread):
             self.finished_with_result.emit(False, f"{type(e).__name__}: {e}")
 
     def _do_work(self):
-        import asyncio
-        asyncio.run(self._restore())
+        token = current_find_my_wait.set(self.find_my_wait)
+        try:
+            asyncio.run(self._restore())
+        finally:
+            self.find_my_wait.finish()
+            current_find_my_wait.reset(token)
 
     async def _restore(self):
-        import tempfile
         from pathlib import Path
         from src.restore.protective import (
-            make_protective_working_copy,
+            make_protective_working_copy, discard_protective_working_copy,
             clean_backup_for_restore,
             verify_backup_payloads,
-            find_latest_protective_backup,
         )
         from src.restore.restore import _restore_protective_backup
         from src.restore.afc_media import (
-            afc_media_dir_for, describe_media_store, media_store_verified,
+            recovery_media_dir, describe_media_store, media_store_verified,
             restore_media_via_afc,
         )
         from src.devicemanagement.session import lockdown_session
@@ -280,15 +305,17 @@ class RestoreCacheThread(QThread):
         # behind by an interrupted apply — after Phase 2 wiped the device that
         # directory is the only copy of the user's data, so the recovery path
         # has to be able to reach it.
-        base = self._find_cache_base(udid)
-        source_root = str(base / "master") if base is not None else None
-        if source_root is None:
-            source_root = find_latest_protective_backup(udid)
+        from src.restore.recovery_source import locate_restore_source
+        finder = getattr(self, '_find_cache_base', None)
+        base = finder(udid) if callable(finder) else None
+        if base is not None:
+            source_root = str(Path(base) / 'master')
+        else:
+            source_root, base = locate_restore_source(udid)
         if source_root is None:
             raise RuntimeError(
                 "No protective backup found for this device. Live backups are "
-                "kept in the app data folder; cache masters live in a temp "
-                "folder and are lost on reboot.")
+                "kept in the configured backup location or the app data folder.")
         # Pre-flight: refuse a half-written source manifest up front instead of
         # failing mid-device-restore with an opaque MBErrorDomain/205. The
         # restore only ever prunes/injects on a temp working copy, so a corrupt
@@ -318,33 +345,14 @@ class RestoreCacheThread(QThread):
         # finished cleanly is treated as the AFC source — "the folder has files
         # in it" is not enough, because a partial pull would then let the prune
         # below delete the backup's own copy of the photos.
-        media_dir = afc_media_dir_for(source_root)
-        from src.restore.protective_cache import peek_cache_info
-        cache_info = peek_cache_info(udid)
-        if cache_info is not None and cache_info.get("media_afc"):
-            from pathlib import Path as _Path
-            try:
-                base = _Path(source_root).parent.parent  # <base>/master/<udid> -> <base>
-            except Exception:
-                base = None
-            if base is not None:
-                media_dir = str(base / "media" / udid)
-        media_has_content = media_store_verified(media_dir)
-        removed_rows, removed_files = await asyncio.to_thread(
-            clean_backup_for_restore, working_root, udid,
-            include_keychain=bool(self._backup_password()),
-            manifest_password=self._backup_password(),
-            exclude_afc_media_trees=media_has_content)
+        media_dir = recovery_media_dir(source_root, udid, cache_base=base)
+        from src.restore.recovery import RecoverySource, RecoveryBackend, prepare_recovery
+        prepared = await prepare_recovery(
+            RecoverySource(working_root, udid, self._backup_password(),
+                           bool(self._backup_password()), media_dir),
+            RecoveryBackend(clean_backup_for_restore, verify_backup_payloads, media_store_verified))
         self.update_label(
-            f"Prepared backup (-{removed_rows} pruned rows). Connecting to device...")
-        missing = await asyncio.to_thread(
-            verify_backup_payloads, working_root, udid,
-            self._backup_password())
-        if missing:
-            raise RuntimeError(
-                f"{len(missing)} manifest rows lack payloads; the backup is "
-                f"incomplete and cannot be restored. Remove the cache and apply "
-                f"again to rebuild it.")
+            f"Prepared backup (-{prepared.removed_rows} pruned rows). Connecting to device...")
 
         lc = None
         async with lockdown_session(udid) as _ld:
@@ -372,8 +380,12 @@ class RestoreCacheThread(QThread):
                 # letting it report success with missing media
                 self.update_label(
                     f"Restoring photos/videos over AFC ({describe_media_store(media_dir)})...")
+                # diff=False: this is an explicit "restore my data" recovery —
+                # the store's copy must win over whatever the device holds, even
+                # at the same size (the files may be corrupt on the device).
                 pushed = await restore_media_via_afc(
                     lc, media_dir, progress_callback=self._progress_cb,
+                    diff=False,
                     prompt_choice=self.prompt_user_choice,
                     unlock_prompt=(
                         QCoreApplication.tr("Device stayed locked"),
@@ -393,6 +405,7 @@ class RestoreCacheThread(QThread):
                         f"AFC media restore failed for {len(pushed['failed'])} "
                         f"file(s) (e.g. {pushed['failed'][:3]}) — the photos on "
                         f"the device are incomplete")
+        discard_protective_working_copy(working_root)
         self.update_label("Data restored successfully.")
 
     def _progress_cb(self, value):
@@ -412,33 +425,6 @@ class RestoreCacheThread(QThread):
             return self.manager._get_backup_password()
         except Exception:
             return ""
-
-    def _find_cache_base(self, udid: str):
-        import tempfile
-        from pathlib import Path
-        from src.restore.storage import cache_base, is_custom_backup_dir
-        bases = []
-        try:
-            bases.append(Path(tempfile.gettempdir()) / "goldennugget_protective_cache")
-        except Exception:
-            pass
-        bases.append(cache_base())
-        if is_custom_backup_dir():
-            # A cache created under the previous default location may still
-            # exist there; read it so it can be migrated on the next refresh.
-            from PySide6.QtCore import QStandardPaths
-            try:
-                bases.append(Path(QStandardPaths.writableLocation(
-                    QStandardPaths.AppDataLocation)) / "GoldenNugget" / "backup_cache")
-            except Exception:
-                pass
-        for base in bases:
-            if (base / "master" / udid / "Manifest.db").is_file():
-                return base
-            if (base / f"{udid}.json").is_file():
-                return base
-        return None
-
 
 class CacheUpdateThread(QThread):
     """Force a refresh of the backup cache master (pre-apply "Update Cache").
@@ -525,6 +511,7 @@ class DeviceMonitorThread(QThread):
     """Listen for usbmux attach/detach notifications without doing lockdownd I/O."""
 
     devices_changed = Signal()
+    usb_devices_changed = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -536,7 +523,7 @@ class DeviceMonitorThread(QThread):
     @staticmethod
     def _device_signature(devices):
         return frozenset(
-            (device.serial, device.connection_type)
+            (device.serial, device.connection_type, getattr(device, 'devid', None))
             for device in devices if device.is_usb
         )
 
@@ -561,6 +548,7 @@ class DeviceMonitorThread(QThread):
                 if isinstance(mux, usbmux.PlistMuxConnection):
                     await asyncio.wait_for(mux.listen(), timeout=3)
                 known_devices = self._device_signature(mux.devices)
+                self.usb_devices_changed.emit(tuple(serial for serial, _, _ in known_devices))
                 pending_devices = known_devices
                 has_pending_change = False
 
@@ -571,6 +559,7 @@ class DeviceMonitorThread(QThread):
                         if has_pending_change:
                             if pending_devices != known_devices:
                                 known_devices = pending_devices
+                                self.usb_devices_changed.emit(tuple(serial for serial, _, _ in known_devices))
                                 self.devices_changed.emit()
                             has_pending_change = False
                         continue

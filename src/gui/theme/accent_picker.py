@@ -58,8 +58,6 @@ class AccentPicker(QWidget):
 
     def _retheme(self):
         from src.gui.theme import themed_stylesheet
-        from src.gui.theme.colors import LIGHT_ACCENT_PRESETS
-        presets = ACCENT_PRESETS if self._tm.is_dark else LIGHT_ACCENT_PRESETS
         for name, btn in self._buttons.items():
             btn.setChecked(name == self._tm.accent_name)
-            btn.setStyleSheet(themed_stylesheet('accent_swatch', swatch=presets[name][0]))
+            btn.setStyleSheet(themed_stylesheet('accent_swatch', swatch=ACCENT_PRESETS[name][0]))

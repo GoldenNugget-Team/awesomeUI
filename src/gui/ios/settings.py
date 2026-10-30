@@ -1,15 +1,17 @@
-from PySide6.QtCore import Qt, QCoreApplication, QTimer, QPropertyAnimation, QEasingCurve, QSize, QUrl
-from PySide6.QtGui import QDesktopServices
+from src.devicemanagement.device_capabilities import device_os_name
+from PySide6.QtCore import Qt, QCoreApplication, QTimer, QPropertyAnimation, QEasingCurve, QSize
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea,
-    QComboBox, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QInputDialog,
+    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QInputDialog,
     QFileDialog, QDialog, QProgressDialog, QGraphicsOpacityEffect, QAbstractButton, QPushButton
 )
+import sys
+from src.gui.liquid.choice_editor import GlassComboBox as QComboBox
 from pathlib import Path
 
 from src.exceptions.nugget_exception import NuggetException
-from src.gui.ios.components import (
-    IOSCard, IOSSectionHeader, IOSSwitch, IOSSettingsAction, IOSSearchField, IOSSearchEmpty, IOSCollapsibleSection
+from src.gui.widgets import (
+    IOSCard, IOSSectionHeader, IOSSwitch, IOSSettingsAction, IOSSearchField, IOSSearchEmpty, IOSCollapsibleSection,
 )
 from src.gui.pages.main.settings import available_languages
 from src.controllers.video_handler import set_ignore_frame_limit
@@ -71,31 +73,18 @@ class IOSSettingsPage(QWidget):
         accent_row.setContentsMargins(16, 12, 16, 12)
         accent_row.setSpacing(12)
         accent_label = QLabel(QCoreApplication.translate("Nugget", "Accent Color"))
+        self._style_label(accent_label, 'row_title')
+        accent_label.setWordWrap(True)
         accent_row.addWidget(accent_label, 1)
         self._accent_picker = AccentPicker()
         accent_row.addWidget(self._accent_picker)
         self.content_layout.addWidget(accent_row_card)
 
-        # Choose which widget the home screen shows next to the device picker.
-        home_widget_card = IOSCard()
-        home_widget_row = QHBoxLayout(home_widget_card)
-        home_widget_row.setContentsMargins(16, 12, 16, 12)
-        home_widget_row.setSpacing(12)
-        home_widget_label = QLabel(QCoreApplication.translate("Nugget", "Home Widget"))
-        home_widget_row.addWidget(home_widget_label, 1)
-        self._home_widget_combo = QComboBox()
-        self._home_widget_combo.addItem(
-            QCoreApplication.translate("Nugget", "Device Storage"), "storage")
-        self._home_widget_combo.addItem(
-            QCoreApplication.translate("Nugget", "Presets"), "presets")
-        self._home_widget_combo.addItem(
-            QCoreApplication.translate("Nugget", "Presets and Device Storage"), "both")
-        _current_widget = self.window.settings.value("home_widget", "presets", type=str)
-        _widget_index = self._home_widget_combo.findData(_current_widget)
-        self._home_widget_combo.setCurrentIndex(_widget_index if _widget_index >= 0 else 1)
-        self._home_widget_combo.activated.connect(self._on_home_widget_changed)
-        home_widget_row.addWidget(self._home_widget_combo)
-        self.content_layout.addWidget(home_widget_card)
+        self.sidebar_switch = self._make_switch(
+            QCoreApplication.translate("Nugget", "Show Sidebar"),
+            self.window.settings.value("ui/show_sidebar", False, type=bool),
+            self._on_sidebar_toggled,
+        )
 
         # TEMP: Classic UI removed — the "iOS-style Interface" switch is hidden;
         # the app is pinned to the iOS-style interface until Classic returns.
@@ -104,11 +93,17 @@ class IOSSettingsPage(QWidget):
         self.content_layout.addWidget(
             IOSSectionHeader(QCoreApplication.translate("Nugget", "Safety")))
         self._hotload = HotLoad(self.window.settings)
-        self.hotload_switch = self._make_switch(
+        self._make_switch(
             QCoreApplication.translate("Nugget",
                 "Apply automatic safety rules (warns on dangerous features)"),
             self._hotload.is_enabled(),
             self._make_hotload_handler(),
+        )
+
+        self.incompatible_tweaks_switch = self._make_switch(
+            QCoreApplication.translate("Nugget", "Enable incompatible tweaks"),
+            self.window.settings.value("enable_incompatible_tweaks", False, type=bool),
+            self._on_incompatible_tweaks_toggled,
         )
 
         # Language
@@ -224,21 +219,25 @@ class IOSSettingsPage(QWidget):
 
         self.content_layout = standard_layout
         self.content_layout.addWidget(self.advanced_section)
+        if not getattr(sys, 'frozen', False):
+            from src.gui.ios.developer import DeveloperPanel
+            self.content_layout.addWidget(IOSSectionHeader(self.tr("Developer")))
+            developer_card = IOSCard()
+            developer_layout = QVBoxLayout(developer_card)
+            developer_layout.setContentsMargins(4, 4, 4, 4)
+            self.developer_panel = DeveloperPanel(self.window, developer_card)
+            developer_layout.addWidget(self.developer_panel)
+            self.content_layout.addWidget(developer_card)
+        self.content_layout.addWidget(IOSSectionHeader(self.tr("Support")))
+        self.app_log_btn = IOSSettingsAction(self.tr("App Log"))
+        self.app_log_btn.clicked.connect(self.window.ios_home.open_logs)
+        self.content_layout.addWidget(self.app_log_btn)
         # About
         self.content_layout.addWidget(IOSSectionHeader(QCoreApplication.translate("Nugget", "About")))
 
         about_btn = IOSSettingsAction(QCoreApplication.translate("Nugget", "About GoldenNugget"))
         about_btn.clicked.connect(self.show_about)
         self.content_layout.addWidget(about_btn)
-
-        diagnostics_btn = IOSSettingsAction(QCoreApplication.translate('Nugget', 'Export Diagnostics'))
-        diagnostics_btn.clicked.connect(self._export_diagnostics)
-        self.content_layout.addWidget(diagnostics_btn)
-
-        self.report_bug_btn = IOSSettingsAction(
-            QCoreApplication.translate('Nugget', 'Report a Bug'))
-        self.report_bug_btn.clicked.connect(self._report_bug)
-        self.content_layout.addWidget(self.report_bug_btn)
 
         self.content_layout.addStretch()
 
@@ -255,22 +254,14 @@ class IOSSettingsPage(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.incompatible_tweaks_switch.blockSignals(True)
+        self.incompatible_tweaks_switch.setChecked(
+            self.window.settings.value("enable_incompatible_tweaks", False, type=bool))
+        self.incompatible_tweaks_switch.blockSignals(False)
         self._sync_setting_dependencies()
         if self._first_show:
             self._first_show = False
             self.setFocus(Qt.OtherFocusReason)
-
-    def _report_bug(self):
-        url = QUrl('https://github.com/GoldenNugget-Team/GoldenNugget/issues/new')
-        if not QDesktopServices.openUrl(url):
-            QMessageBox.warning(
-                self, QCoreApplication.translate('Nugget', 'Report a Bug'),
-                QCoreApplication.translate(
-                    'Nugget', 'Could not open the browser. Open this link to report a bug:\n{0}').format(url.toString()))
-
-    def _export_diagnostics(self):
-        from src.gui.dialogs.diagnostics import DiagnosticsDialog
-        DiagnosticsDialog(self.window.settings, self.window.device_manager, self).exec()
 
     def _on_advanced_toggled(self, expanded):
         self.window.settings.setValue('advanced_settings_expanded', expanded)
@@ -350,26 +341,26 @@ class IOSSettingsPage(QWidget):
             matches += visible_rows
         self.search_empty.setVisible(searching and matches == 0)
 
+    def _style_label(self, label, key):
+        label.setProperty('theme_style_key', key)
+        label.setStyleSheet(t(key))
+
+
     def _retheme(self):
         c = self._tm.colors
-        for label in [*self.findChildren(QLabel), *self.findChildren(QAbstractButton)]:
-            style_key = label.property('theme_style_key')
+        for widget in [*self.findChildren(QLabel), *self.findChildren(QAbstractButton)]:
+            style_key = widget.property('theme_style_key')
             if style_key:
-                label.setStyleSheet(t(style_key))
+                widget.setStyleSheet(t(style_key))
         self._scroll.setStyleSheet(
             f"background-color: {c.bg_primary}; border: none;"
         )
         self._accent_picker.setStyleSheet("background-color: transparent;")
-        if hasattr(self, '_home_widget_combo'):
-            self._retheme_home_widget_dropdown()
+        self.app_log_btn.setIcon(theme_icon(":/icon/file-earmark-text.svg", c.text_primary))
         if hasattr(self, '_lang_drp'):
             self._retheme_lang_dropdown()
         if hasattr(self, '_saved_ids_list'):
             self._retheme_saved_ids_list()
-        if hasattr(self, '_preset_name_txt'):
-            self._retheme_preset_inputs()
-        if hasattr(self, '_preset_list'):
-            self._retheme_preset_list()
         if hasattr(self, 'history_count_lbl'):
             self.history_count_lbl.setStyleSheet(t("value_label"))
         # Edit-value buttons style themselves once in _make_text_row, so they
@@ -377,29 +368,6 @@ class IOSSettingsPage(QWidget):
         for button in self.findChildren(QPushButton, "settingsEditValue"):
             button.setStyleSheet(t("tweak_info_button"))
             button.setIcon(theme_icon(":/icon/edit-value.svg", c.text_secondary))
-
-    def _retheme_home_widget_dropdown(self):
-        c = self._tm.colors
-        self._home_widget_combo.setStyleSheet(f"""
-            QComboBox {{
-                background-color: {c.bg_tertiary};
-                border: 1px solid {c.border};
-                border-radius: 10px;
-                color: {c.text_primary};
-                font-size: 10.5pt;
-                padding: 8px 12px;
-                min-width: 140px;
-            }}
-            QComboBox::drop-down {{ border: none; width: 24px; }}
-            QComboBox::down-arrow {{ image: url(:/icon/chevron.down.svg); width: 12px; height: 8px; margin-right: 8px; }}
-            QComboBox QAbstractItemView {{
-                background-color: {c.bg_tertiary};
-                border: 1px solid {c.border};
-                border-radius: 10px;
-                color: {c.text_primary};
-                selection-background-color: {c.accent};
-            }}
-        """)
 
     def _retheme_lang_dropdown(self):
         c = self._tm.colors
@@ -439,40 +407,23 @@ class IOSSettingsPage(QWidget):
             QListWidget::item:selected {{ background-color: {c.scrollbar_pressed}; color: {c.text_primary}; }}
         """)
 
-    def _retheme_preset_inputs(self):
-        c = self._tm.colors
-        for edit in (self._preset_name_txt, self._preset_desc_txt):
-            edit.setStyleSheet(f"""
-                QLineEdit {{
-                    background-color: {c.bg_input};
-                    border: none;
-                    border-radius: 10px;
-                    color: {c.text_primary};
-                    font-size: 14px;
-                    padding: 10px 14px;
-                }}
-            """)
-
-    def _retheme_preset_list(self):
-        c = self._tm.colors
-        self._preset_list.setStyleSheet(f"""
-            QListWidget {{
-                background-color: {c.bg_input};
-                border: none;
-                border-radius: 8px;
-                color: {c.text_primary};
-                font-size: 13px;
-                padding: 4px;
-            }}
-            QListWidget::item {{ padding: 8px; }}
-            QListWidget::item:selected {{ background-color: {c.scrollbar_pressed}; color: {c.text_primary}; }}
-        """)
-
     # ---------- helpers ----------
 
     def _style_label(self, label, key):
         label.setProperty('theme_style_key', key)
         label.setStyleSheet(t(key))
+
+    def _on_sidebar_toggled(self, checked):
+        self.window.set_sidebar_enabled(checked)
+
+    def _on_incompatible_tweaks_toggled(self, checked):
+        from src.gui.ios.tweaks import IOSSectionContent
+        self.window.settings.setValue("enable_incompatible_tweaks", checked)
+        self.window.settings.setValue("incompatible_tweaks_choice_done", True)
+        self.window.settings.sync()
+        for content in self.window.findChildren(IOSSectionContent):
+            if content._inner is not None:
+                content.rebuild()
 
     def _make_switch(self, title: str, checked: bool, on_toggled) -> IOSSwitch:
         c = self._tm.colors
@@ -505,12 +456,6 @@ class IOSSettingsPage(QWidget):
         def handler(checked: bool):
             self._hotload.set_enabled(checked)
         return handler
-
-    def _on_home_widget_changed(self, index: int):
-        """Choose the available home-screen widget categories."""
-        mode = self._home_widget_combo.itemData(index)
-        if mode:
-            self.window.ios_home.set_home_widget(mode)
 
     def _on_autosave_toggled(self, checked: bool):
         """Persist the AutoSave option and re-label the home preset banner.
@@ -762,12 +707,11 @@ class IOSSettingsPage(QWidget):
         return card
 
     def _on_text_row_edit(self, title: str, on_submit):
-        c = self._tm.colors
         dialog = QInputDialog(self)
         dialog.setWindowTitle(title)
         dialog.setLabelText(QCoreApplication.translate("Nugget", "Enter value:"))
         dialog.setTextValue(self.window.device_manager.pref_manager.organization_name)
-        dialog.setStyleSheet(t('text_input_dialog'))
+        dialog.setStyleSheet(t("text_input_dialog"))
         if dialog.exec() == QDialog.Accepted:
             text = dialog.textValue()
             on_submit(text)
@@ -791,6 +735,7 @@ class IOSSettingsPage(QWidget):
         row.addWidget(label, 1)
 
         self.lang_drp = QComboBox()
+        self.lang_drp.setProperty('liveTranslateItems', True)
         self._lang_drp = self.lang_drp
         for language, code in available_languages.items():
             self.lang_indexes.append(code)
@@ -812,7 +757,15 @@ class IOSSettingsPage(QWidget):
         new_lang = self.lang_indexes[index]
         current_choice = self.window.settings.value('locale_code', '', type=str) or ''
         if new_lang != current_choice:
-            self.window.translator.set_new_language(new_lang, restart=True)
+            self.window.translator.set_new_language(new_lang)
+            from PySide6.QtCore import QSignalBlocker
+            liquid = getattr(self.window, 'liquid', None)
+            panel = getattr(liquid, 'settings', None)
+            for combo in (getattr(self, 'lang_drp', None), getattr(panel, 'language', None)):
+                if combo is not None:
+                    blocker = QSignalBlocker(combo)
+                    combo.setCurrentIndex(index)
+                    del blocker
 
     def _make_pb_setup_section(self):
         c = self._tm.colors
@@ -889,9 +842,10 @@ class IOSSettingsPage(QWidget):
         layout.setContentsMargins(16, 12, 16, 12)
         self.history_list = QListWidget()
         self.history_list.setMinimumHeight(120)
-        self.history_search = QLineEdit()
+        self.history_search = IOSSearchField()
         self.history_search.setPlaceholderText(QCoreApplication.translate(
             "Nugget", "Search history..."))
+        self.history_search.setAccessibleName(self.history_search.placeholderText())
         self.history_search.textChanged.connect(self._refresh_history)
         layout.addWidget(self.history_search)
         filters = QHBoxLayout()
@@ -966,7 +920,7 @@ class IOSSettingsPage(QWidget):
                 when = item.get("timestamp", "")
             mode = QCoreApplication.translate("Nugget", "Apply") if item.get("mode") == "apply" else QCoreApplication.translate("Nugget", "Reset")
             result = QCoreApplication.translate("Nugget", "Success") if item.get("success") else QCoreApplication.translate("Nugget", "Failed")
-            text = f"{when}  •  {mode}  •  {item.get('device', 'Unknown device')}  •  iOS {item.get('ios', '?')}  •  {result}"
+            text = f"{when}  •  {mode}  •  {item.get('device', 'Unknown device')}  •  {device_os_name(item.get('model', ''))} {item.get('ios', '?')}  •  {result}"
             if item.get("error"):
                 text += f"\n{item['error']}"
             list_item = QListWidgetItem(self.history_list)
@@ -1007,6 +961,7 @@ class IOSSettingsPage(QWidget):
         btn.setProperty('theme_style_key', 'mini_button')
         btn.setStyleSheet(t('mini_button'))
         return btn
+
 
     def _on_pb_get_db(self):
         from src.gui.dialogs import PosterBoardDBWizard

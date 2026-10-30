@@ -2,7 +2,8 @@
 from PySide6.QtCore import QCoreApplication, Qt
 from PySide6.QtWidgets import QLabel, QPushButton, QPlainTextEdit, QVBoxLayout, QHBoxLayout, QWidget
 
-from src.gui.ios.components import IOSCard
+from src.devicemanagement.device_capabilities import device_text
+from src.gui.widgets import IOSCard
 from src.gui.theme import t, ColorThemeManager, theme_pixmap
 
 
@@ -100,7 +101,7 @@ class OperationResultCard(IOSCard):
         self._retheme()
         self.hide()
 
-    def show_result(self, success, text, is_reset=False, restart_required=False):
+    def show_result(self, success, text, is_reset=False, restart_required=False, device_model=""):
         self._success = success
         self.title.setText(QCoreApplication.translate("Nugget",
             "Defaults restored!" if success and is_reset else "Apply complete!" if success else "Operation failed or stopped"))
@@ -108,6 +109,9 @@ class OperationResultCard(IOSCard):
             ("Restart your iPhone to see the changes, then check the result." if restart_required else "Check the result on your iPhone. You can keep GoldenNugget open.")
             if success else
             "Completion was not confirmed. Expand details and logs before retrying; follow any recovery instructions shown."))
+        self.summary.setText(device_text(self.summary.text(), device_model))
+        self.find_my_description.setText(device_text(QCoreApplication.translate("Nugget",
+            "If you disabled Find My, re-enable it on your iPhone: Settings → your name → Find My → Find My iPhone."), device_model))
         self.find_my_reminder.setVisible(success)
         self.details.setPlainText(text)
         self.expand_btn.setChecked(False)

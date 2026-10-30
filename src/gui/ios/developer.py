@@ -9,7 +9,9 @@ import time
 from PySide6.QtCore import QCoreApplication, QTimer
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
-from src.gui.ios.components import IOSSwitch, _auto_retheme
+from src.gui.widgets import (
+    IOSSwitch, _auto_retheme,
+)
 from src.gui.theme import t
 
 

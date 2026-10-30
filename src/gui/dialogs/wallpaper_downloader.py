@@ -11,6 +11,7 @@ no background ``QThread`` lifetime issues.
 """
 
 import hashlib
+from src.gui.liquid.choice_editor import GlassComboBox as QComboBox
 import os
 import time
 import uuid
@@ -18,10 +19,12 @@ import uuid
 from PySide6.QtCore import Qt, QCoreApplication, QTimer, QUrl, QStandardPaths, QByteArray, QSize
 from PySide6.QtGui import QPixmap, QMovie
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
-from src.gui.ios.components import IOSSearchField
+from src.gui.widgets import (
+    IOSSearchField,
+)
 
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QScrollArea, QGridLayout, QPushButton, QWidget, QMessageBox,
     QProgressBar, QFrame,
 )

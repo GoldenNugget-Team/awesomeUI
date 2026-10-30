@@ -1,6 +1,6 @@
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QToolButton, QSizePolicy
-from PySide6.QtGui import QFont, QIcon, QPixmap
-from PySide6.QtCore import QCoreApplication, QSize
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QToolButton, QSizePolicy, QScrollArea, QFrame
+from PySide6.QtGui import QFont, QIcon, QPixmap, QDesktopServices
+from PySide6.QtCore import QCoreApplication, QSize, Qt, QUrl
 
 from webbrowser import open_new_tab
 
@@ -40,14 +40,6 @@ class PBHelpDialog(QDialog):
         layout.addWidget(self.buttonBox)
         self.setLayout(layout)
 
-
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QToolButton, QSizePolicy, QScrollArea, QFrame
-from PySide6.QtGui import QFont, QIcon, QPixmap, QDesktopServices
-from PySide6.QtCore import QSize, Qt, QUrl
-
-from webbrowser import open_new_tab
-
-from src.controllers.web_request_handler import Nugget_Repo, get_latest_version
 
 # App version
 from src.gui.version import App_Version, App_Build
@@ -202,37 +194,4 @@ class AboutProgramDialog(QDialog):
             widget.setStyleSheet(t(key))
 
 
-class UpdateAppDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-
-        QBtn = (
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-        )
-
-        self.buttonBox = QDialogButtonBox(QBtn)
-        self.buttonBox.accepted.connect(self.accept)
-        self.buttonBox.rejected.connect(self.reject)
-
-        layout = QVBoxLayout()
-        title = QLabel(self.tr("Update Available"))
-        title_font = QFont()
-        title_font.setBold(True)
-        title.setFont(title_font)
-
-        message_text = ""
-        latest_version = get_latest_version()
-        if latest_version != None:
-            message_text += self.tr("Nugget v{0} is available. ").format(latest_version)
-        message_text += self.tr("Would you like to go to the download on GitHub?")
-        message = QLabel(message_text)
-
-        layout.addWidget(title)
-        layout.addWidget(message)
-        layout.addWidget(self.buttonBox)
-        self.setLayout(layout)
-
-    def accept(self):
-        # open up the repo page
-        open_new_tab(f"https://github.com/{Nugget_Repo}")
-        super().accept()
+from src.gui.dialogs.update_dialog import UpdateDialog as UpdateAppDialog

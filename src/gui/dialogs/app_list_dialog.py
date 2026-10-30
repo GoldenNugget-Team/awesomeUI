@@ -18,8 +18,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import hashlib
+import time
+from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QThread, Signal, QSize
+from PySide6.QtCore import QCoreApplication, QThread, Signal, QSize, QStandardPaths
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QListWidget,
@@ -27,7 +30,9 @@ from PySide6.QtWidgets import (
 )
 
 from src.gui.theme import ColorThemeManager, theme_icon, t
-from src.gui.ios.components import IOSSearchField
+from src.gui.widgets import (
+    IOSSearchField,
+)
 
 class FetchAppsThread(QThread):
     """Pull the installed-app list from the device on a background thread."""
@@ -76,20 +81,58 @@ class FetchAppsThread(QThread):
         return apps
 
     async def _fetch_icons(self, apps):
+        from contextlib import AsyncExitStack
         from src.devicemanagement.session import lockdown_session
         from pymobiledevice3.services.springboard import SpringBoardServicesService
+        base = QStandardPaths.writableLocation(QStandardPaths.CacheLocation)
+        cache = Path(base) / "AppIcons" / hashlib.sha256(self.udid.encode()).hexdigest()
         try:
-            async with lockdown_session(self.udid) as lockdown:
-                async with SpringBoardServicesService(lockdown) as service:
-                    for app in apps:
+            cache.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            cache = None
+        pending = []
+        for app in apps:
+            key = f"{app['bundle_id']}:{app.get('version', '')}"
+            path = cache / (hashlib.sha256(key.encode()).hexdigest() + '.png') if cache else None
+            try:
+                st = path.stat() if path is not None else None
+                if st is not None and 0 < st.st_size <= 1024 * 1024 and time.time() - st.st_mtime < 86400:
+                    data = path.read_bytes()
+                    if data.startswith(b'\x89PNG\r\n\x1a\n'):
+                        self.icon_ready.emit(app['bundle_id'], data)
+                        continue
+            except OSError:
+                pass
+            pending.append((app, path))
+        if not pending or self.isInterruptionRequested():
+            return
+        try:
+            async with lockdown_session(self.udid) as lockdown, AsyncExitStack() as stack:
+                services = [await stack.enter_async_context(SpringBoardServicesService(lockdown))]
+                if len(pending) > 12:
+                    try:
+                        services.append(await stack.enter_async_context(SpringBoardServicesService(lockdown)))
+                    except Exception:
+                        pass  # Devices limiting service count still work sequentially.
+                queue = iter(pending)
+                async def fetch(service):
+                    for app, path in queue:
                         if self.isInterruptionRequested():
                             return
                         try:
                             data = await asyncio.wait_for(service.get_icon_pngdata(app['bundle_id']), 5)
                         except Exception:
-                            return
+                            continue
                         if data:
                             self.icon_ready.emit(app['bundle_id'], data)
+                            try:
+                                # Atomic cache writes: another dialog may use the same key.
+                                from src.utils.payload import install_payload
+                                if path is not None:
+                                    install_payload(data, path)
+                            except OSError:
+                                pass
+                await asyncio.gather(*(fetch(service) for service in services))
         except Exception:
             return
 
@@ -109,6 +152,9 @@ class AppListExportDialog(QDialog):
         self.setModal(True)
         self.resize(640, 660)
         self._apps: list[dict] = []
+        self._apps_by_id = {}
+        self._app_items = {}
+        self._icons = {}
         self._thread = None
         self._selected: dict | None = None
 
@@ -125,7 +171,7 @@ class AppListExportDialog(QDialog):
 
         self.filter_input = IOSSearchField(self)
         self.filter_input.setPlaceholderText(QCoreApplication.translate("Nugget", "Filter by name or bundle id..."))
-        self.filter_input.textChanged.connect(self._apply_filter)
+        self.filter_input.connect_filter(self._apply_filter)
         self.filter_input.setVisible(False)
         layout.addWidget(self.filter_input)
 
@@ -178,6 +224,10 @@ class AppListExportDialog(QDialog):
         self._thread.start()
 
     def _on_done(self, apps: list[dict]):
+        selected = self.list_widget.currentItem()
+        selected_id = selected.app['bundle_id'] if selected is not None else None
+        self.list_widget.clear()
+        self._app_items.clear()
         self._apps = apps
         self.status_lbl.setText(QCoreApplication.translate("Nugget", 
             "{0} apps installed on the iPhone.").format(len(apps)))
@@ -185,32 +235,43 @@ class AppListExportDialog(QDialog):
         self.list_widget.setVisible(True)
         self.export_btn.setEnabled(bool(apps))
         self._apply_filter()
+        if selected_id in self._app_items:
+            item = self._app_items[selected_id]
+            if not item.isHidden():
+                self.list_widget.setCurrentItem(item)
 
     def _on_failed(self, error: str):
         self.status_lbl.setText(QCoreApplication.translate("Nugget", 
             "Could not read the app list.\n\n{0}").format(error))
 
     def _apply_filter(self):
-        needle = self.filter_input.text().strip().lower()
-        self.list_widget.clear()
-        for app in self._apps:
-            hay = f"{app['display_name']} {app['bundle_id']}".lower()
-            if needle and needle not in hay:
-                continue
-            item = QListWidgetItem(
-                f"{app['display_name']}\n{app['bundle_id']}")
-            item.setSizeHint(QSize(0, 76))
-            data = app.get('icon_data')
-            pixmap = QPixmap()
-            if data:
-                pixmap.loadFromData(data)
-            icon = QIcon(pixmap) if not pixmap.isNull() else theme_icon(
-                ":/icon/app-indicator.svg", ColorThemeManager.instance().colors.text_secondary)
-            item.setIcon(icon)
-            item.app = app
-            self.list_widget.addItem(item)
-        if self.list_widget.count():
-            self.list_widget.setCurrentRow(0)
+        needle = self.filter_input.text().strip().casefold()
+        if len(self._app_items) != len(self._apps):
+            self.list_widget.clear()
+            self._app_items.clear()
+            self._apps_by_id = {app['bundle_id']: app for app in self._apps}
+            fallback = theme_icon(":/icon/app-indicator.svg", ColorThemeManager.instance().colors.text_secondary)
+            for app in self._apps:
+                item = QListWidgetItem(f"{app['display_name']}\n{app['bundle_id']}")
+                item.setSizeHint(QSize(0, 76))
+                item.app = app
+                item.setIcon(self._icons.get(app['bundle_id'], fallback))
+                self.list_widget.addItem(item)
+                self._app_items[app['bundle_id']] = item
+        selected = self.list_widget.currentItem()
+        first = None
+        self.list_widget.setUpdatesEnabled(False)
+        try:
+            for app in self._apps:
+                item = self._app_items[app['bundle_id']]
+                visible = not needle or needle in f"{app['display_name']} {app['bundle_id']}".casefold()
+                item.setHidden(not visible)
+                if visible and first is None:
+                    first = item
+            if selected is None or selected.isHidden():
+                self.list_widget.setCurrentItem(first)
+        finally:
+            self.list_widget.setUpdatesEnabled(True)
 
     def _on_current_changed(self, current, _previous):
         self._selected = None
@@ -222,18 +283,17 @@ class AppListExportDialog(QDialog):
         self._thread = None
 
     def _on_icon(self, bundle_id, data):
-        for app in self._apps:
-            if app['bundle_id'] == bundle_id:
-                app['icon_data'] = data
-                break
+        app = self._apps_by_id.get(bundle_id)
+        if app is not None:
+            app['icon_data'] = data
         pixmap = QPixmap()
         if not pixmap.loadFromData(data):
             return
-        for index in range(self.list_widget.count()):
-            item = self.list_widget.item(index)
-            if item.app['bundle_id'] == bundle_id:
-                item.setIcon(QIcon(pixmap))
-                break
+        icon = QIcon(pixmap)
+        self._icons[bundle_id] = icon
+        item = self._app_items.get(bundle_id)
+        if item is not None:
+            item.setIcon(icon)
 
     def _add_selected(self):
         app = self._selected

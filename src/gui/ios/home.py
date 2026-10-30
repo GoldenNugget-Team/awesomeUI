@@ -1,22 +1,29 @@
-import sys
+import time
 from PySide6.QtCore import (
-    Qt, QCoreApplication, Slot, QTimer, QSize, QEvent, Signal, QThread,
+    Qt, QCoreApplication, QT_TRANSLATE_NOOP, Slot, QTimer, QSize, QEvent, Signal, QThread,
 )
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPainter, QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-    QComboBox, QSizePolicy, QScrollArea, QProgressBar, QToolButton, QTabWidget
+    QComboBox, QSizePolicy, QScrollArea, QTabWidget, QBoxLayout
 )
 
-from src.gui.ios.components import IOSCard, IOSPrimaryButton
+from src.gui.widgets import (
+    IOSCard, IOSPrimaryButton,
+)
 from src.gui.theme import t, ColorThemeManager, theme_icon, theme_pixmap
 
 from src.gui.ios.feature_icons import FEATURE_ICONS
+from src.gui.ios.nugget_logo import NuggetLogo
+from src.devicemanagement.device_capabilities import device_os_name
+from src.devicemanagement.constants import normalize_udid
+from src.devicemanagement.storage_info import format_device_capacity
 from src.devicemanagement.passcode_support import current_passcode_theme_reason
 
 
 class _StorageThread(QThread):
     result = Signal(object, object, object)
+    capacity_ready = Signal(object)
 
     def __init__(self, udid, parent=None):
         super().__init__(parent)
@@ -24,54 +31,53 @@ class _StorageThread(QThread):
 
     def run(self):
         import asyncio
-        try:
-            total, free, battery = asyncio.run(self._query())
-        except Exception:
-            total, free, battery = None, None, None
-        self.result.emit(total, free, battery)
+        asyncio.run(self._query())
 
     async def _query(self):
+        import asyncio
+        import logging
         from src.devicemanagement.session import lockdown_session
+        from pymobiledevice3.services.afc import AfcService
         from pymobiledevice3.services.diagnostics import DiagnosticsService
-        async with lockdown_session(self.udid) as lockdown:
-            battery = None
-            try:
-                async with DiagnosticsService(lockdown) as diagnostics:
-                    try:
-                        battery_report = await diagnostics.get_battery()
-                        if isinstance(battery_report, dict):
-                            percent = self._first_number(
-                                battery_report, "CurrentCapacity", "BatteryCurrentCapacity")
-                            if percent is not None:
-                                charging = battery_report.get("IsCharging", False)
-                                if isinstance(charging, str):
-                                    charging = charging.casefold() in ("1", "true", "yes")
-                                battery = {
-                                    "percent": percent,
-                                    "charging": bool(charging),
-                                }
-                    except Exception:
-                        pass
-                    report = await diagnostics.info("All")
-                if isinstance(report, dict):
-                    nested = report.get("DiskUsage") if isinstance(report.get("DiskUsage"), dict) else {}
-                    total = report.get("TotalDataCapacity", nested.get("TotalDataCapacity"))
-                    free = report.get("TotalDataSpace", nested.get("TotalDataSpace"))
-                    if total is not None and free is not None:
-                        return int(total), int(free), battery
-            except Exception:
-                # Some iOS versions reject the diagnostics relay request while
-                # still exposing the same volume figures through AFC.
-                pass
 
-            from pymobiledevice3.services.afc import AfcService
-            async with AfcService(lockdown) as afc:
-                info = await afc.get_device_info()
-            total = self._first_number(info, "FSTotalBytes", "TotalBytes")
-            free = self._first_number(info, "FSFreeBytes", "FreeBytes")
-            if total is None or free is None:
-                return None, None, battery
-            return total, free, battery
+        async def storage():
+            try:
+                async with lockdown_session(self.udid, autopair=False, connection_type="USB") as lockdown:
+                    try:
+                        disk = await lockdown.get_value(domain="com.apple.disk_usage")
+                        capacity = self._first_number(disk, "TotalDiskCapacity")
+                        if capacity and capacity > 1_000_000_000:
+                            self.capacity_ready.emit(capacity)
+                    except Exception:
+                        logging.getLogger('GoldenNugget.device_preview').debug('Hardware capacity unavailable', exc_info=True)
+                    async with AfcService(lockdown) as afc:
+                        info = await afc.get_device_info()
+                    total = self._first_number(info, "FSTotalBytes", "TotalBytes")
+                    free = self._first_number(info, "FSFreeBytes", "FreeBytes")
+                    self.result.emit(total, free, None)
+            except Exception:
+                logging.getLogger('GoldenNugget.device_preview').debug('Storage query unavailable for %s', self.udid, exc_info=True)
+
+        async def battery():
+            try:
+                async with lockdown_session(self.udid, autopair=False, connection_type="USB") as lockdown:
+                    async with DiagnosticsService(lockdown) as diagnostics:
+                        report = await diagnostics.get_battery()
+                    if not isinstance(report, dict):
+                        return
+                    percent = self._first_number(report, "CurrentCapacity", "BatteryCurrentCapacity")
+                    if percent is None:
+                        return
+                    charging = report.get("IsCharging", False)
+                    if isinstance(charging, str):
+                        charging = charging.casefold() in ("1", "true", "yes")
+                    self.result.emit(None, None, {
+                        "percent": percent, "charging": bool(charging),
+                        "low_power": report.get("LowPowerModeEnabled") if isinstance(report.get("LowPowerModeEnabled"), bool) else None})
+            except Exception:
+                logging.getLogger('GoldenNugget.device_preview').debug('Battery query unavailable for %s', self.udid, exc_info=True)
+
+        await asyncio.gather(asyncio.wait_for(storage(), 4), asyncio.wait_for(battery(), 4), return_exceptions=True)
 
     @staticmethod
     def _first_number(values, *keys):
@@ -92,7 +98,12 @@ class _TileCard(IOSCard):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMouseTracking(False)
+        self.setMouseTracking(True)
+
+    def showEvent(self,event):
+        for label in self.findChildren(QLabel):
+            label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        super().showEvent(event)
 
     def _retheme(self):
         self.setStyleSheet(t("home_tile"))
@@ -122,7 +133,7 @@ class _CardGrid(QWidget):
     def eventFilter(self, obj, event):
         if obj in self._cards:
             etype = event.type()
-            if etype == QEvent.Hide:
+            if etype == QEvent.Hide and obj.isHidden():
                 self._hidden.add(obj)
                 self._reflow()
             elif etype == QEvent.Show:
@@ -133,13 +144,18 @@ class _CardGrid(QWidget):
     def reflow(self):
         self._reflow()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reflow()
+
     def _reflow(self):
         include = [c for c in self._cards if c not in self._hidden]
-        self.setMinimumWidth(
-            len(include) * self.MIN_CARD_WIDTH + max(0, len(include) - 1) * self.SPACING)
+        self.setMinimumWidth(self.MIN_CARD_WIDTH)
         target = []
         if include:
-            cols = min(len(include), self.MAX_COLUMNS)
+            fit = min(len(include), self.MAX_COLUMNS, max(1, (self.width() + self.SPACING) // (self.MIN_CARD_WIDTH + self.SPACING)))
+            rows = (len(include) + fit - 1) // fit
+            cols = (len(include) + rows - 1) // rows
             for i, card in enumerate(include):
                 target.append((i // cols, i % cols, card))
         key = tuple((r, c, id(w)) for r, c, w in target)
@@ -148,16 +164,40 @@ class _CardGrid(QWidget):
         for card in self._cards:
             self._grid.removeWidget(card)
         for col in range(self.MAX_COLUMNS):
-            self._grid.setColumnStretch(col, 1 if col < len(include) else 0)
+            self._grid.setColumnStretch(col, 1 if include and col < cols else 0)
         for r, c, w in target:
-            self._grid.addWidget(w, r, c)
+            self._grid.addWidget(w, r, c, Qt.AlignHCenter)
         self._layout_key = key
 
 
+class DeviceSelector(QComboBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.currentIndexChanged.connect(self.update_visible_devices)
+
+    def update_visible_devices(self, *_args):
+        current = self.currentIndex()
+        has_alternative = any(isinstance(self.itemData(row, Qt.UserRole), int)
+                              and row != current for row in range(self.count()))
+        for row in range(self.count()):
+            selected_device = row == current and isinstance(self.itemData(row, Qt.UserRole), int)
+            leading_separator = not has_alternative and self.itemData(row, Qt.AccessibleDescriptionRole) == "separator"
+            self.view().setRowHidden(row, selected_device or leading_separator)
+
+    def showPopup(self):
+        self.update_visible_devices()
+        super().showPopup()
+
+    def hidePopup(self):
+        super().hidePopup()
+        self.update_visible_devices()
+
+
 class IOSHomePage(QWidget):
+    selection_counts_requested = Signal()
     # Feature tile: a big icon over the name. The tile height is left to the
     # layout so a subtitle that wraps to two lines grows the whole row.
-    TILE_ICON_PX = 68
+    TILE_ICON_PX = 92
 
     def __init__(self, window, parent=None):
         super().__init__(parent)
@@ -174,34 +214,37 @@ class IOSHomePage(QWidget):
         outer.setSpacing(0)
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
         self._scroll = scroll
         content = QWidget()
         scroll.setWidget(content)
         outer.addWidget(scroll)
 
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(16)
+        layout.setContentsMargins(16, 6, 16, 98)
+        layout.setSpacing(12)
 
         # Logo + Title row
-        header = QHBoxLayout()
-        header.setSpacing(8)
+        self._header_layout = header = QHBoxLayout()
+        header.setSpacing(20)
+        self._branding = branding = QWidget(content)
+        branding_layout = QVBoxLayout(branding)
+        branding_row = QHBoxLayout()
+        branding_row.setSpacing(12)
+        branding_layout.addLayout(branding_row)
+        branding_layout.setContentsMargins(0, 0, 0, 0)
+        branding_layout.setSpacing(8)
+        branding.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        header.addWidget(branding, 0, Qt.AlignTop)
 
-        # Load logo from resources
-        self._logo = QLabel(self)
-        self._logo.setFixedSize(88, 88)
-        self._logo.setScaledContents(True)
-        pixmap = QPixmap(":/credits/nugget_half_eaten.png")
-        if not pixmap.isNull():
-            self._logo.setPixmap(pixmap)
-        else:
-            self._logo.setStyleSheet(f"background-color: {self._c.bg_secondary}; border-radius: 14px;")
-        header.addWidget(self._logo)
+        self._logo = NuggetLogo(self)
+        branding_row.addWidget(self._logo, 0, Qt.AlignTop)
 
         title_layout = QVBoxLayout()
         title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.setSpacing(4)
-        title_layout.setAlignment(Qt.AlignVCenter)
+        title_layout.setSpacing(8)
+        title_layout.setAlignment(Qt.AlignTop)
         self._title = QLabel(QCoreApplication.translate("Nugget", "GoldenNugget"), self)
         self._title.setStyleSheet(t("home_title"))
         self._title.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -212,58 +255,100 @@ class IOSHomePage(QWidget):
         self.subtitle.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.subtitle.setTextFormat(Qt.PlainText)
         title_layout.addWidget(self.subtitle)
-        header.addLayout(title_layout)
+        self._update_available = None
+        self.update_notice = QWidget(branding)
+        notice_row = QHBoxLayout(self.update_notice)
+        notice_row.setContentsMargins(0, 0, 0, 0)
+        notice_row.setSpacing(4)
+        self.outdated_lbl = QLabel(self.tr("Outdated version"), self.update_notice)
+        self.update_info_btn = QPushButton("ⓘ", self.update_notice)
+        self.update_info_btn.setFixedSize(24, 24)
+        self.update_info_btn.setCursor(Qt.PointingHandCursor)
+        self.update_info_btn.setAccessibleName(self.tr("About this outdated version and updates"))
+        self.update_info_btn.setToolTip(self.tr("You're on an outdated version of Nugget. View update options."))
+        self.update_info_btn.clicked.connect(self._show_update_info)
+        notice_row.addWidget(self.outdated_lbl)
+        notice_row.addWidget(self.update_info_btn)
+        notice_row.addStretch()
+        self.update_notice.hide()
+        title_layout.addWidget(self.update_notice)
+        branding_row.addLayout(title_layout, 1)
 
         self.control_tabs = QTabWidget(self)
         self.control_tabs.setDocumentMode(True)
-        self.control_tabs.setFixedHeight(116)
-        self.control_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-        self._developer_page = None
-        if not getattr(sys, 'frozen', False):
-            from src.gui.ios.developer import DeveloperPanel
-            self._developer_page = DeveloperPanel(self.window, self.control_tabs)
+        self.control_tabs.tabBar().setUsesScrollButtons(False)
+        self.control_tabs.tabBar().setDrawBase(False)
+        self.control_tabs.setFixedSize(500, 174)
 
         devices_page = QWidget(self.control_tabs)
-        self._devices_page = devices_page
-        devices_layout = QVBoxLayout(devices_page)
-        devices_layout.setContentsMargins(12, 8, 12, 8)
-        devices_layout.setSpacing(4)
-        self.device_combo = QComboBox(devices_page)
-        self.device_combo.setFixedHeight(36)
-        devices_layout.addWidget(self.device_combo)
+        self._device_summary_page = devices_page
+        devices_row = QHBoxLayout(devices_page)
+        devices_row.setContentsMargins(10, 0, 12, 0)
+        devices_row.setSpacing(10)
+        from src.gui.ios.device_preview import DevicePreview
+        self._device_preview = DevicePreview(self.window, devices_page, scale=1.25)
+        devices_row.addWidget(self._device_preview)
+        devices_layout = QVBoxLayout()
+        devices_row.addLayout(devices_layout, 1)
+        devices_layout.setContentsMargins(0, 0, 0, 0)
+        devices_layout.setSpacing(8)
+        devices_layout.setAlignment(Qt.AlignVCenter)
+        self.device_combo = DeviceSelector(devices_page)
+        self.device_combo.setFixedHeight(38)
+        self.device_combo.setMinimumWidth(260)
+        self.device_combo.setMaximumWidth(440)
+        selector_row = QHBoxLayout()
+        selector_row.setSpacing(10)
+        self.device_name = QLabel(devices_page)
+        self.device_name.setWordWrap(True)
+        self.device_software = QLabel(devices_page)
+        self.device_software.setWordWrap(True)
+        devices_layout.addWidget(self.device_name)
+        title_layout.insertWidget(2, self.device_combo)
+        devices_layout.addWidget(self.device_software)
+        self.device_connection = QLabel(devices_page)
+        self.device_connection.setWordWrap(True)
+        devices_layout.addWidget(self.device_connection)
+        self._devices_page = QWidget(self.control_tabs)
+        picker_layout = QHBoxLayout(self._devices_page)
+        picker_layout.setContentsMargins(10, 0, 10, 0)
+        picker_layout.setSpacing(14)
+        self._picker_preview = DevicePreview(self.window, self._devices_page)
+        picker_layout.addWidget(self._picker_preview)
+        picker_info = QVBoxLayout()
+        picker_info.setSpacing(8)
+        self.picker_combo = DeviceSelector(self._devices_page)
+        self.picker_combo.setModel(self.device_combo.model())
+        self.picker_combo.setMinimumWidth(260)
+        self.picker_combo.setMinimumHeight(38)
+        self.picker_combo.setStyleSheet(self.device_combo.styleSheet())
+        self.picker_combo.currentIndexChanged.connect(self._on_picker_device_changed)
+        picker_info.addWidget(self.picker_combo)
+        self.picker_software = QLabel(self._devices_page)
+        self.picker_software.setWordWrap(True)
+        picker_info.addWidget(self.picker_software)
+        from src.gui.ios.device_details import DeviceDetailsWidget
+        self.picker_details = DeviceDetailsWidget(self.window, self._devices_page)
+        picker_info.addWidget(self.picker_details)
+        picker_layout.addLayout(picker_info, 1)
+        self.control_tabs.addTab(self._devices_page, self.tr("Device selection"))
         self.status_lbl = QLabel("", devices_page)
         self.status_lbl.setTextFormat(Qt.RichText)
         self.status_lbl.setOpenExternalLinks(False)
         self.status_lbl.setWordWrap(False)
-        self.status_lbl.setStyleSheet("font-size: 11px; font-weight: 600;")
+        self.status_lbl.setStyleSheet("font-size: 13px; font-weight: 600;")
         self.status_lbl.linkActivated.connect(self._show_device_support)
-        devices_layout.addWidget(self.status_lbl)
+        status_row = QHBoxLayout()
+        status_row.setSpacing(8)
+        status_row.addWidget(self.status_lbl)
+        status_row.addStretch()
+        devices_layout.addLayout(status_row)
         self.control_tabs.addTab(devices_page, QCoreApplication.translate("Nugget", "Devices"))
-
         presets_page = QWidget(self.control_tabs)
         self._presets_page = presets_page
         presets_layout = QHBoxLayout(presets_page)
         presets_layout.setContentsMargins(10, 6, 10, 6)
         presets_layout.setSpacing(12)
-        self.storage_card = IOSCard()
-        self.storage_card.setFixedHeight(64)
-        storage_layout = QVBoxLayout(self.storage_card)
-        storage_layout.setContentsMargins(10, 7, 10, 7)
-        storage_layout.setSpacing(3)
-        self.storage_title = QLabel(QCoreApplication.translate("Nugget", "Device Storage"))
-        self.storage_title.setStyleSheet(t("home_tile_title"))
-        storage_layout.addWidget(self.storage_title)
-        self.storage_bar = QProgressBar()
-        self.storage_bar.setRange(0, 100)
-        self.storage_bar.setValue(0)
-        self.storage_bar.setTextVisible(False)
-        self.storage_bar.setFixedHeight(6)
-        storage_layout.addWidget(self.storage_bar)
-        self.storage_lbl = QLabel(QCoreApplication.translate("Nugget", "Connect an iPhone to view storage"))
-        self.storage_lbl.setStyleSheet(t("home_tile_subtitle"))
-        self.storage_lbl.setWordWrap(False)
-        storage_layout.addWidget(self.storage_lbl)
         self.presets_card = QWidget(presets_page)
         preset_content = QHBoxLayout(self.presets_card)
         preset_content.setContentsMargins(12, 4, 12, 4)
@@ -293,61 +378,49 @@ class IOSHomePage(QWidget):
         preset_content.addWidget(self.manage_presets_btn)
         preset_content.addStretch(1)
         presets_layout.addWidget(self.presets_card, 1)
-        self._storage_page = QWidget(self.control_tabs)
-        storage_page_layout = QVBoxLayout(self._storage_page)
-        storage_page_layout.setContentsMargins(10, 6, 10, 6)
-        storage_page_layout.addWidget(self.storage_card)
-        self._apply_home_widget()
+        self._build_control_tabs()
 
-        self._refresh_btn = QToolButton(self)
-        self._refresh_btn.setFixedSize(92, 40)
-        self._refresh_btn.setIconSize(QSize(21, 21))
-        self._refresh_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self._refresh_btn.setText(QCoreApplication.translate("Nugget", "Refresh"))
-        self._style_utility_button(self._refresh_btn)
-        self._refresh_btn.setToolTip(QCoreApplication.translate("Nugget", "Refresh connected devices"))
-        self._apply_icon(self._refresh_btn, ":/icon/arrow-clockwise.svg")
-        self._refresh_btn.clicked.connect(self.refresh_devices)
-        self._logs_btn = QToolButton(self)
-        self._logs_btn.setFixedSize(88, 40)
-        self._logs_btn.setIconSize(QSize(21, 21))
-        self._logs_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self._logs_btn.setText(QCoreApplication.translate("Nugget", "App Log"))
-        self._style_utility_button(self._logs_btn)
-        self._logs_btn.setToolTip(QCoreApplication.translate("Nugget", "Open application log"))
-        self._apply_icon(self._logs_btn, ":/icon/file-earmark-text.svg")
-        self._logs_btn.clicked.connect(self.open_logs)
-        self._settings_btn = QToolButton(self)
-        self._settings_btn.setFixedSize(94, 40)
-        self._settings_btn.setIconSize(QSize(21, 21))
-        self._settings_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self._settings_btn.setText(QCoreApplication.translate("Nugget", "Settings"))
-        self._style_utility_button(self._settings_btn)
-        self._settings_btn.setToolTip(QCoreApplication.translate("Nugget", "Settings"))
-        self._apply_icon(self._settings_btn, ":/icon/gear.svg")
-        self._settings_btn.clicked.connect(self.open_settings)
-        utility_corner = QWidget(self.control_tabs)
-        utility_layout = QHBoxLayout(utility_corner)
-        utility_layout.setContentsMargins(0, 0, 4, 0)
-        utility_layout.setSpacing(2)
-        utility_layout.addWidget(self._refresh_btn)
-        utility_layout.addWidget(self._logs_btn)
-        utility_layout.addWidget(self._settings_btn)
-        self.control_tabs.setCornerWidget(utility_corner, Qt.TopRightCorner)
         self._style_control_tabs()
+        self.control_tabs.tabBar().hide()
 
-        header.addWidget(self.control_tabs, 1)
+        self._device_area = QWidget(content)
+        self._device_area_layout = QBoxLayout(QBoxLayout.LeftToRight, self._device_area)
+        self._device_area_layout.setContentsMargins(0, 0, 0, 0)
+        self._device_area_layout.setSpacing(16)
+        self._device_area_layout.addWidget(self.control_tabs, 0, Qt.AlignTop | Qt.AlignLeft)
+        from src.gui.ios.support_panel import CommunityLinks
+        self.community_links = CommunityLinks(self._device_area)
+        self._device_area_layout.addWidget(self.community_links, 1, Qt.AlignTop | Qt.AlignLeft)
+        header.addWidget(self._device_area, 1, Qt.AlignTop)
         layout.addLayout(header)
+        self._scroll.viewport().installEventFilter(self)
+        QTimer.singleShot(0, self._fit_header)
+        self.connection_notice = QLabel(self)
+        self.connection_notice.setWordWrap(True)
+        self.connection_notice.setTextFormat(Qt.PlainText)
+        self.connection_notice.setStyleSheet(t("home_subtitle"))
+        self.connection_notice.hide()
+        layout.addWidget(self.connection_notice)
+        from src.gui.ios.device_details import DeviceDetailsWidget
+        self.device_details = DeviceDetailsWidget(self.window, devices_page)
+        self.device_details.selection_counts_changed.connect(self.community_links.set_counts)
+        self.window.ios_pages.currentChanged.connect(self._refresh_home_counts)
+        self.device_details.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        devices_layout.addWidget(self.device_details)
+        selector_row.addStretch()
 
         self._style_device_combo()
         self.populate_device_picker()
         self.device_combo.currentIndexChanged.connect(self.on_device_changed)
 
         self._storage_thread = None
+        self._storage_workers = {}
+        self._device_info_cache = {}
+        self._device_info_stopping = False
         self.control_tabs.currentChanged.connect(self._on_control_tab_changed)
 
         cards_row = [self._make_card(
-            "PosterBoard", "Animated wallpapers & templates", 2),
+            "PosterBoard", QT_TRANSLATE_NOOP("Nugget", "Animated wallpapers & video"), 2),
             self._make_card(
             "Tweaks", "Customize system settings", 1),
             self._make_card(
@@ -358,23 +431,36 @@ class IOSHomePage(QWidget):
             "Icon Themes", "Themed app icons & labels", 10),
             self._make_card(
             "Passcode Theme", "Custom keypad theme (.passthm)", 11)]
-        (self.posterboard_card, self.tweaks_card,
-         self.daemons_card, self.statusbar_card,
-         self.icon_themes_card, self.passcode_theme_card) = cards_row
+        (self.posterboard_card, _, self.daemons_card,
+         self.statusbar_card, _, self.passcode_theme_card) = cards_row
         self.cards_grid = _CardGrid(cards_row)
         layout.addWidget(self.cards_grid)
+        # Keep the catalog as a compact row below the feature tiles.
+        self.catalog_card = self._make_catalog_row()
+        layout.addWidget(self.catalog_card)
 
         # Apply / Reset share one row on the home screen.
         actions = QHBoxLayout()
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(12)
 
-        apply_btn = IOSPrimaryButton(QCoreApplication.translate("Nugget", "Apply Tweaks"))
+        self.apply_btn = apply_btn = IOSPrimaryButton(QCoreApplication.translate("Nugget", "Apply Tweaks"))
         apply_btn.clicked.connect(self.open_apply_classic)
         actions.addWidget(apply_btn, 1)
 
         layout.addLayout(actions)
 
+        from src.gui.ios.restore_progress import RestoreProgressCard
+        self.progress_card = RestoreProgressCard(self, compact=True)
+        layout.addWidget(self.progress_card)
+        self.operation_status_btn = IOSPrimaryButton(self.tr("Restore Status"))
+        self.operation_status_btn.clicked.connect(self.open_apply_classic)
+        self.operation_status_btn.hide()
+        layout.addWidget(self.operation_status_btn)
+        from src.gui.ios.find_my_warning import FindMyWarningCard
+        self.find_my_warning = FindMyWarningCard(self.window, self)
+        layout.addWidget(self.find_my_warning)
+        self._progress_busy = False
         self.process_status_lbl = QLabel("", self)
         self.process_status_lbl.setWordWrap(True)
         self.process_status_lbl.setAlignment(Qt.AlignCenter)
@@ -384,13 +470,15 @@ class IOSHomePage(QWidget):
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.hide_process_status)
+        from src.controllers.feature_news import FeatureNews
+        FeatureNews.instance()
 
         from src.gui.ios.operation_result import OperationResultCard
         self.result_card = OperationResultCard(self.open_logs, self.window.dismiss_operation_result)
         layout.addWidget(self.result_card)
 
         from src.gui.ios.support_panel import SupportPanel
-        self.support_panel = SupportPanel(self)
+        self.support_panel = SupportPanel(self, links=self.community_links)
         layout.addWidget(self.support_panel)
         layout.addStretch()
 
@@ -407,21 +495,21 @@ class IOSHomePage(QWidget):
             QComboBox {{
                 background-color: {c.bg_secondary};
                 border: 1px solid {c.accent};
-                border-radius: 18px;
+                border-radius: 12px;
                 color: {c.text_primary};
-                padding: 0 16px;
-                font-size: 11.25pt;
+                padding: 0 10px;
+                font-size: 15px;
             }}
             QComboBox::drop-down {{
-                width: 30px;
+                width: 24px;
                 border: none;
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
             }}
             QComboBox::down-arrow {{
                 image: url(:/icon/caret-down-fill.svg);
-                width: 12px;
-                height: 12px;
+                width: 10px;
+                height: 10px;
             }}
             QComboBox QAbstractItemView {{
                 background-color: {c.bg_secondary};
@@ -433,10 +521,13 @@ class IOSHomePage(QWidget):
     def _style_control_tabs(self):
         c = self._c
         self.control_tabs.setStyleSheet(f"""
+            QTabWidget::tab-bar {{
+                alignment: center;
+            }}
             QTabWidget::pane {{
                 background: {c.bg_secondary};
                 border: 1px solid {c.border};
-                border-radius: 10px;
+                border-radius: 22px;
                 top: -1px;
             }}
             QTabBar::tab {{
@@ -444,8 +535,8 @@ class IOSHomePage(QWidget):
                 color: {c.text_secondary};
                 border: 1px solid transparent;
                 border-radius: 7px;
-                padding: 5px 12px;
-                margin: 3px 2px;
+                padding: 5px 6px;
+                margin: 3px 1px;
                 font-size: 12px;
                 font-weight: 600;
             }}
@@ -458,26 +549,6 @@ class IOSHomePage(QWidget):
                 background: {c.surface_hover};
                 color: {c.text_primary};
             }}
-        """)
-
-    def _style_utility_button(self, button):
-        c = self._c
-        button.setStyleSheet(f"""
-            QToolButton {{
-                background: transparent;
-                color: {c.text_secondary};
-                border: 1px solid transparent;
-                border-radius: 12px;
-                font-size: 11px;
-                font-weight: 600;
-                padding: 4px;
-            }}
-            QToolButton:hover {{
-                background: {c.bg_secondary};
-                color: {c.text_primary};
-                border-color: {c.border};
-            }}
-            QToolButton:pressed {{ background: {c.surface_hover}; }}
         """)
 
     def _style_manage_presets_button(self):
@@ -496,9 +567,6 @@ class IOSHomePage(QWidget):
             QPushButton:pressed {{ background: {c.accent}; }}
         """)
 
-    def _apply_icon(self, button, resource_path: str):
-        button.setIcon(theme_icon(resource_path, self._c.text_primary))
-
     def _retheme(self):
         self._c = ColorThemeManager.instance().colors
         c = self._c
@@ -507,20 +575,10 @@ class IOSHomePage(QWidget):
             self._logo.setStyleSheet(f"background-color: {c.bg_secondary}; border-radius: 14px;")
         self._title.setStyleSheet(t("home_title"))
         self.subtitle.setStyleSheet(t("home_subtitle"))
+        self.community_links._retheme()
         self._style_control_tabs()
         self._style_device_combo()
-        self._style_utility_button(self._refresh_btn)
-        self._apply_icon(self._refresh_btn, ":/icon/arrow-clockwise.svg")
-        self._style_utility_button(self._logs_btn)
-        self._apply_icon(self._logs_btn, ":/icon/file-earmark-text.svg")
-        self._style_utility_button(self._settings_btn)
-        self._apply_icon(self._settings_btn, ":/icon/gear.svg")
-        self.storage_title.setStyleSheet(t("home_tile_title"))
-        self.storage_lbl.setStyleSheet(t("home_tile_subtitle"))
-        self.storage_bar.setStyleSheet(f"""
-            QProgressBar {{ background: {c.bg_input}; border: none; border-radius: 4px; }}
-            QProgressBar::chunk {{ background: {c.accent}; border-radius: 4px; }}
-        """)
+        self._update_control_icons()
         self.presets_title.setStyleSheet(t("home_tile_title"))
         self.presets_lbl.setStyleSheet(t("home_tile_subtitle"))
         self.presets_icon.setPixmap(theme_pixmap(":/icon/folder.svg", c.accent, 26))
@@ -532,27 +590,79 @@ class IOSHomePage(QWidget):
             self._paint_tile_icon(icon_lbl, icon_res)
             title_lbl.setStyleSheet(t("home_tile_title"))
             sub_lbl.setStyleSheet(t("home_tile_subtitle"))
+        self.device_name.setStyleSheet(f"color:{c.text_primary}; font-size:16px; font-weight:600; background:transparent;")
+        self.device_software.setStyleSheet(f"color:{c.text_secondary}; font-size:12px; background:transparent;")
+        self.device_connection.setStyleSheet(self.device_software.styleSheet())
+        self.picker_software.setStyleSheet(self.device_software.styleSheet())
+        self.picker_combo.setStyleSheet(self.device_combo.styleSheet())
+        self._paint_catalog_row()
         self.update_passcode_support()
 
+    def _device_picker_label(self, device):
+        from pymobiledevice3.irecv_devices import IRECV_DEVICES
+        model = getattr(device, "model", "")
+        model_name = next((item.display_name for item in IRECV_DEVICES
+                           if item.product_type == model), model)
+        info = getattr(self, "_device_info_cache", {}).get(device.udid, {})
+        capacity = format_device_capacity(info.get("capacity"))
+        details = " · ".join(part for part in (model_name, capacity) if part)
+        return f"{device.name} ({details})"
+
+    def _update_picker_labels(self):
+        devices = {device.udid: device for device in self.window.device_manager.devices}
+        for row in range(self.device_combo.count()):
+            device = devices.get(self.device_combo.itemData(row, Qt.UserRole + 1))
+            if device is not None:
+                label = self._device_picker_label(device)
+                self.device_combo.setItemText(row, label)
+                self.device_combo.setItemData(row, label, Qt.ToolTipRole)
+        for combo in (self.device_combo, self.picker_combo):
+            combo.view().setMinimumWidth(max(combo.width(), combo.view().sizeHintForColumn(0) + 64))
+
+    def _refresh_picker_storage(self):
+        if (self._device_info_stopping or getattr(self.window, "apply_in_progress", False)
+                or getattr(self.window, "_cache_restore_in_progress", False)):
+            return
+        for row in range(self.device_combo.count()):
+            udid = self.device_combo.itemData(row, Qt.UserRole + 1)
+            if not udid or udid in self._storage_workers:
+                continue
+            cached = self._device_info_cache.get(udid, {})
+            if time.monotonic() - cached.get("checked", 0) < 15:
+                continue
+            worker = _StorageThread(udid, self)
+            self._storage_workers[udid] = worker
+            worker.result.connect(self._on_storage_result)
+            worker.capacity_ready.connect(self._on_capacity_result)
+            worker.finished.connect(self._on_storage_finished)
+            worker.start()
+
     def populate_device_picker(self):
+        self.picker_combo.blockSignals(True)
         self.device_combo.blockSignals(True)
         self.device_combo.clear()
         usb_devices = []
         try:
-            devices = self.window.device_manager.devices
+            devices = list(self.window.device_manager.devices)
+            connected = getattr(self.window, "_connected_usb_udids", None)
+            connected = {normalize_udid(udid) for udid in connected} if connected is not None else None
+            selected_udid = normalize_udid(self.window.device_manager.get_current_device_udid())
             usb_devices = [
                 (index, device) for index, device in enumerate(devices)
-                if device.connected_via_usb
+                if device.connected_via_usb and (
+                    connected is None or normalize_udid(device.udid) in connected)
             ]
             if usb_devices:
                 for device_index, device in usb_devices:
-                    self.device_combo.addItem(
-                        theme_icon(":/icon/phone.svg", self._c.text_primary), device.name)
+                    label = self._device_picker_label(device)
+                    self.device_combo.addItem(label)
                     self.device_combo.setItemData(
                         self.device_combo.count() - 1, device_index, Qt.UserRole)
+                    self.device_combo.setItemData(
+                        self.device_combo.count() - 1, device.udid, Qt.UserRole + 1)
                 selected = next(
-                    (position for position, (device_index, _) in enumerate(usb_devices)
-                     if device_index == self.window.device_manager.current_device_index),
+                    (position for position, (_, device) in enumerate(usb_devices)
+                     if normalize_udid(device.udid) == selected_udid),
                     0)
                 self.device_combo.setCurrentIndex(selected)
             else:
@@ -560,19 +670,37 @@ class IOSHomePage(QWidget):
         except Exception:
             self.device_combo.addItem(QCoreApplication.translate("QCoreApplication", "No Device"))
             usb_devices = []
+        self.picker_combo.setCurrentIndex(self.device_combo.currentIndex())
+        self.picker_combo.blockSignals(False)
+        self.picker_combo.update_visible_devices()
         self.device_combo.blockSignals(False)
+        self.device_combo.update_visible_devices()
         self.device_combo.view().setMinimumWidth(max(
             self.device_combo.width(), self.device_combo.view().sizeHintForColumn(0) + 64))
+        QTimer.singleShot(0, self._refresh_picker_storage)
+
+    def _on_picker_device_changed(self, index):
+        self.device_combo.blockSignals(True)
+        self.device_combo.setCurrentIndex(index)
+        self.device_combo.blockSignals(False)
+        self.on_device_changed(index)
 
     @Slot()
     def on_device_changed(self, index):
         if getattr(self, '_support_dialog', None) is not None:
             self._support_dialog.close()
         device_index = self.device_combo.itemData(index, Qt.UserRole)
-        if device_index is not None:
-            self.window.change_selected_device(device_index)
-            self.update_device_info()
-            self.update_status()
+        if isinstance(device_index, int):
+            self.picker_combo.blockSignals(True)
+            self.picker_combo.setCurrentIndex(index)
+            self.picker_combo.blockSignals(False)
+            self.picker_combo.update_visible_devices()
+            udid = self.device_combo.itemData(index, Qt.UserRole + 1)
+            self.window._preferred_device_udid = udid
+            selected = next((position for position, device in enumerate(self.window.device_manager.devices)
+                             if device.udid == udid), None)
+            if selected is not None:
+                self.window.change_selected_device(selected)
 
     @Slot()
     def refresh_devices(self):
@@ -593,7 +721,7 @@ class IOSHomePage(QWidget):
         self.window.open_presets_section()
 
     def switch_to_ios_page(self, index: int):
-        self.window.show_ios_page(index)
+        self.window.bottom_navigation.navigate(index)
 
     def open_apply_classic(self):
         """Open the dedicated Apply page before starting an operation."""
@@ -605,7 +733,25 @@ class IOSHomePage(QWidget):
         dialog = ResetDialog(device_manager=self.window.device_manager, apply_reset=self.window.apply_changes)
         dialog.exec()
 
+    def set_operation_busy(self, busy):
+        if busy:
+            self.operation_status_btn.show()
+        if busy and not self._progress_busy:
+            manager = self.window.device_manager
+            preferences = manager.pref_manager
+            self.progress_card.start(manager.get_current_device_partially_supported(),
+                                     preferences.auto_reboot or preferences.skip_setup,
+                                     manager.get_current_device_model())
+            self.process_status_lbl.hide()
+        self._progress_busy = busy
+        self.find_my_warning.set_busy(busy)
+        self.progress_card.setVisible(busy)
+
     def show_process_status(self, text: str, success: bool = None):
+        if self._progress_busy and success is None:
+            self.progress_card.set_status(text)
+            self.process_status_lbl.hide()
+            return
         c = self._c
         if success is True:
             color = c.success
@@ -614,7 +760,7 @@ class IOSHomePage(QWidget):
         else:
             color = c.accent
         self.process_status_lbl.setStyleSheet(
-            f"font-size: 14px; font-weight: 600; color: {color}; background-color: transparent;")
+            f"font-size: 14px; font-weight: 600; color: {color};")
         self.process_status_lbl.setText(text)
         self.process_status_lbl.show()
         self._hide_timer.stop()
@@ -624,8 +770,24 @@ class IOSHomePage(QWidget):
     def hide_process_status(self):
         self.process_status_lbl.hide()
 
+    def set_update_available(self, available):
+        self._update_available = available
+        self.update_notice.setVisible(available is not None)
+        self.outdated_lbl.setText(self.tr("Outdated version") if available else self.tr("Up to date!"))
+        self.update_info_btn.setVisible(available is True)
+        self.update_status()
+
+    def _show_update_info(self):
+        from src.gui.dialogs.update_dialog import UpdateDialog
+        dialog = UpdateDialog(self.window)
+        dialog.exec()
+        dialog.deleteLater()
+
     def update_status(self):
         c = self._c
+        update_color = c.success if self._update_available is False else c.error
+        self.outdated_lbl.setStyleSheet(f"color: {update_color}; font-size: 13px; font-weight: 600;")
+        self.update_info_btn.setStyleSheet(f"QPushButton {{ color: {c.error}; background: transparent; border: none; font-size: 17px; }} QPushButton:hover {{ background: {c.bg_tertiary}; border-radius: 6px; }}")
         try:
             if self.window.device_manager.get_current_device_udid():
                 if not self.window.device_manager.get_current_device_is_supported_by_fork():
@@ -639,12 +801,13 @@ class IOSHomePage(QWidget):
                     status_text = QCoreApplication.translate("QCoreApplication", "Supported!")
                     color = c.success
             else:
-                status_text = QCoreApplication.translate("Nugget", "Not connected")
+                status_text = ""
                 color = c.text_primary
         except AttributeError:
-            status_text = QCoreApplication.translate("Nugget", "Not connected")
+            status_text = ""
             color = c.text_primary
-        if self.window.device_manager.get_current_device_udid():
+        self.status_lbl.setVisible(bool(status_text))
+        if status_text:
             self.status_lbl.setText(
                 f"<a href='support' style='color:{color}; text-decoration:none;'>"
                 f"{status_text}  ⓘ</a>")
@@ -654,7 +817,7 @@ class IOSHomePage(QWidget):
             self.status_lbl.setText(f"<span style='color:{color};'>{status_text}</span>")
             self.status_lbl.setToolTip("")
         self.status_lbl.setStyleSheet(
-            f"font-size: 11px; font-weight: 600; padding-left: 2px; color: {color};")
+            f"font-size: 13px; font-weight: 600; padding-left: 2px; color: {color};")
 
     def _show_device_support(self, _link=None):
         if not self.window.device_manager.get_current_device_udid():
@@ -671,22 +834,80 @@ class IOSHomePage(QWidget):
         dialog.finished.connect(lambda: setattr(self, '_support_dialog', None))
         dialog.show()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_header()
+
+    def eventFilter(self, obj, event):
+        if obj is self._scroll.viewport() and event.type() == QEvent.Resize:
+            QTimer.singleShot(0, self._fit_header)
+        return super().eventFilter(obj, event)
+
+    def _fit_header(self):
+        if not hasattr(self, "community_links"):
+            return
+        available = max(1, self._scroll.viewport().width() - 32)
+        branding = self._branding.minimumSizeHint().width()
+        phone = getattr(self, "_control_preferred_width", 360)
+        cards = self.community_links.minimumWidth()
+        stacked_header = available < branding + phone + 20
+        self._header_layout.setDirection(QBoxLayout.TopToBottom if stacked_header else QBoxLayout.LeftToRight)
+        right_width = available if stacked_header else available - branding - 20
+        side_by_side = right_width >= phone + cards + 16
+        self._device_area_layout.setDirection(QBoxLayout.LeftToRight if side_by_side else QBoxLayout.TopToBottom)
+        self.control_tabs.setFixedWidth(min(phone, right_width))
+
+    def _refresh_home_counts(self, index):
+        if index == 0:
+            self.device_details._update_selection_counts()
+
     def update_device_info(self):
+        manager = self.window.device_manager
+        connected = bool(manager.get_current_device_udid())
+        self.device_name.setText(self.device_combo.currentText() if connected else self.tr("No device connected"))
+        self.device_name.setToolTip(self.device_combo.currentText() if connected else "")
+        self._picker_preview.set_device(manager.get_current_device_udid(), manager.get_current_device_model())
+        self._device_preview.set_device(
+            self.window.device_manager.get_current_device_udid(),
+            self.window.device_manager.get_current_device_model())
         if getattr(self, '_support_dialog', None) is not None:
             self._support_dialog.close()
+        software_text = ""
         try:
             ver = self.window.device_manager.get_current_device_version()
             build = self.window.device_manager.get_current_device_build()
             if ver:
-                text = QCoreApplication.translate("Nugget", "iOS {0}").format(ver)
-                if build:
-                    text += "  ·  " + QCoreApplication.translate("Nugget", "Build {0}").format(build)
+                text = QCoreApplication.translate("Nugget", "{0} {1}").format(device_os_name(self.window.device_manager.get_current_device_model()), ver)
                 self.subtitle.setText(text)
+                software_text = text
+                if build:
+                    software_text += "  ·  " + QCoreApplication.translate("Nugget", "Build {0}").format(build)
             else:
                 self.subtitle.setText(QCoreApplication.translate("Nugget", "No device connected"))
         except AttributeError:
             self.subtitle.setText(QCoreApplication.translate("Nugget", "No device connected"))
+        self.subtitle.clear()
+        self.subtitle.hide()
+        self.device_name.setVisible(connected)
+        self.device_name.setText(manager.get_current_device_name() if connected else "")
+        self.device_software.setText(software_text if connected else "")
+        device = next((item for item in manager.devices if item.udid == manager.get_current_device_udid()), None)
+        connection = self.tr("Connected via USB") if connected else ""
+        developer_mode = getattr(device, "developer_mode", None)
+        if isinstance(developer_mode, bool):
+            connection += " · " + (self.tr("Developer Mode: On") if developer_mode else self.tr("Developer Mode: Off"))
+        self.device_connection.setText(connection)
+        self.device_connection.setVisible(connected)
+        self.picker_software.setText(software_text if connected else self.tr("No device connected"))
+        self.picker_combo.blockSignals(True)
+        self.picker_combo.setCurrentIndex(self.device_combo.currentIndex())
+        self.picker_combo.blockSignals(False)
+        self.picker_combo.update_visible_devices()
         self.update_passcode_support()
+        self.device_details.setVisible(bool(self.window.device_manager.get_current_device_udid()))
+        self.device_details.update_info()
+        self.device_details._update_selection_counts()
+        self.picker_details.update_info()
         self._refresh_storage()
 
     def update_passcode_support(self):
@@ -703,109 +924,121 @@ class IOSHomePage(QWidget):
         caption.setStyleSheet(t("home_tile_subtitle") + f"color: {color};")
         title.setStyleSheet(t("home_tile_title") +
                            f"color: {self._c.text_disabled if reason else self._c.text_primary};")
-        icon.setPixmap(theme_pixmap(resource,
-            self._c.text_disabled if reason else self._c.text_primary,
-            self.TILE_ICON_PX, self.devicePixelRatioF()))
+        self._paint_tile_icon(icon, resource)
 
     def _refresh_storage(self):
-        # Also feeds the pre-apply warnings in MainWindow, so always collect
-        # the figures even while the storage card is not the active widget.
-        if self._storage_thread is not None and self._storage_thread.isRunning():
-            return
         udid = self.window.device_manager.get_current_device_udid()
-        if not udid:
-            self.window._storage_info = None
-            self.window._battery_info = None
-            self.storage_bar.setValue(0)
-            self.storage_lbl.setText(QCoreApplication.translate(
-                "Nugget", "Connect an iPhone to view storage"))
+        cached = self._device_info_cache.get(udid, {})
+        self.window._storage_info = cached.get("storage")
+        self.window._battery_info = cached.get("battery")
+        self.device_details.update_info()
+        self.picker_details.update_info()
+        if not udid or self._device_info_stopping:
             return
-        self.storage_lbl.setText(QCoreApplication.translate("Nugget", "Loading storage…"))
-        self._storage_thread = _StorageThread(udid, self)
-        self._storage_thread.result.connect(self._on_storage_result)
-        self._storage_thread.start()
+        if udid in self._storage_workers:
+            self._storage_thread = self._storage_workers[udid]
+            return
+        if time.monotonic() - cached.get("checked", 0) < 15:
+            return
+        worker = _StorageThread(udid, self)
+        self._storage_thread = worker
+        self._storage_workers[udid] = worker
+        worker.result.connect(self._on_storage_result)
+        worker.capacity_ready.connect(self._on_capacity_result)
+        worker.finished.connect(self._on_storage_finished)
+        worker.start()
+        self.device_details.update_info()
+        self.picker_details.update_info()
 
-    @Slot(object, object)
+    @Slot(object)
+    def _on_capacity_result(self, capacity):
+        worker = self.sender()
+        if self._storage_workers.get(worker.udid) is not worker:
+            return
+        cached = self._device_info_cache.setdefault(worker.udid, {})
+        cached["capacity"] = int(capacity)
+        if cached.get("storage"):
+            cached["storage"]["capacity"] = int(capacity)
+        self._update_picker_labels()
+        if worker.udid == self.window.device_manager.get_current_device_udid():
+            self.device_details.update_info()
+            self.picker_details.update_info()
+
+    @Slot(object, object, object)
     def _on_storage_result(self, total, free, battery):
-        current_udid = self.window.device_manager.get_current_device_udid()
-        sender = self.sender()
-        if sender is not self._storage_thread or getattr(sender, "udid", None) != current_udid:
-            QTimer.singleShot(0, self._refresh_storage)
+        worker = self.sender()
+        if self._storage_workers.get(worker.udid) is not worker:
             return
-        if not total or free is None or total <= 0:
-            self.window._storage_info = None
-            self.window._battery_info = None
-            self.storage_bar.setValue(0)
-            self.storage_lbl.setText(QCoreApplication.translate(
-                "Nugget", "Storage information unavailable"))
-            return
-        self.window._storage_info = {
-            "udid": current_udid, "total": int(total), "free": int(free)
-        }
-        self.window._battery_info = {
-            "udid": current_udid, **(battery or {})
-        } if battery is not None else None
-        used = max(0, total - free)
-        percent = min(100, round(used * 100 / total))
-        self.storage_bar.setValue(percent)
-        self.storage_lbl.setText(QCoreApplication.translate(
-            "Nugget", "Used {0} GB · Free {1} GB").format(
-                self._format_gb(used), self._format_gb(free)))
+        cached = self._device_info_cache.setdefault(worker.udid, {})
+        if battery is not None:
+            cached["battery"] = {"udid": worker.udid, **battery}
+        if total and total > 0 and free is not None:
+            cached["storage"] = {"udid": worker.udid, "total": int(total), "free": int(free),
+                                 "capacity": cached.get("capacity")}
+            self._update_picker_labels()
+        if worker.udid == self.window.device_manager.get_current_device_udid():
+            self.window._storage_info = cached.get("storage")
+            self.window._battery_info = cached.get("battery")
+            self.device_details.update_info()
+            self.picker_details.update_info()
 
-    @staticmethod
-    def _format_gb(value):
-        return f"{value / (1024 ** 3):.1f}"
+    def _on_storage_finished(self):
+        worker = self.sender()
+        if self._storage_workers.get(worker.udid) is worker:
+            del self._storage_workers[worker.udid]
+        self._device_info_cache.setdefault(worker.udid, {})["checked"] = time.monotonic()
+        if worker is self._storage_thread:
+            self._storage_thread = None
+        worker.deleteLater()
+        if worker.udid == self.window.device_manager.get_current_device_udid():
+            self.device_details.update_info()
+            self.picker_details.update_info()
+
+    def stop_device_info(self):
+        self._device_info_stopping = True
+        deadline = time.monotonic() + 5
+        return all(worker.wait(max(0, int((deadline - time.monotonic()) * 1000)))
+                   for worker in list(self._storage_workers.values()))
 
     def refresh_device_combo(self):
         self.populate_device_picker()
 
-    def _home_widget_mode(self) -> str:
-        try:
-            mode = self.window.settings.value("home_widget", "presets", type=str)
-        except Exception:
-            mode = "presets"
-        return mode if mode in ("storage", "presets", "both") else "presets"
+    def _build_control_tabs(self):
+        self._control_icons = {self._devices_page: ":/icon/phone.svg", self._presets_page: ":/icon/folder.svg"}
+        self.control_tabs.addTab(self._presets_page, QCoreApplication.translate("Nugget", "Presets"))
+        self._control_actions = {}
+        self._control_action_titles = {}
+        for title, resource, callback in (
+            ("Settings", ":/icon/gear.svg", self.open_settings),
+        ):
+            page = QWidget(self.control_tabs)
+            self.control_tabs.addTab(page, self.tr(title))
+            self._control_action_titles[page] = self.tr(title)
+            self.control_tabs.setTabToolTip(self.control_tabs.indexOf(page), self.tr(title))
+            page.setAccessibleName(self.tr(title))
+            self._control_actions[page] = callback
+            self._control_icons[page] = resource
+        self._last_control_page = self._device_summary_page
+        self.control_tabs.setCurrentWidget(self._device_summary_page)
+        self.control_tabs.setIconSize(QSize(21, 21))
+        self._update_control_icons()
+        self._control_preferred_width = 360
+        self.control_tabs.setFixedWidth(min(self._control_preferred_width, max(320, self.width() - 48)))
 
-    def _apply_home_widget(self):
-        mode = self._home_widget_mode()
-        current = self.control_tabs.currentWidget()
-        self._presets_page.hide()
-        self._storage_page.hide()
-        self.control_tabs.blockSignals(True)
-        while self.control_tabs.count():
-            self.control_tabs.removeTab(0)
-        if self._developer_page is not None:
-            self.control_tabs.addTab(self._developer_page, QCoreApplication.translate("Nugget", "Developer"))
-        self.control_tabs.addTab(self._devices_page, QCoreApplication.translate("Nugget", "Devices"))
-        if mode in ("presets", "both"):
-            self.control_tabs.addTab(self._presets_page, QCoreApplication.translate("Nugget", "Presets"))
-        if mode in ("storage", "both"):
-            self.control_tabs.addTab(self._storage_page, QCoreApplication.translate("Nugget", "Device Storage"))
-        if current is not None and self.control_tabs.indexOf(current) >= 0:
-            self.control_tabs.setCurrentWidget(current)
-        # A preferred width, not a fixed one: the window is only 1000px wide,
-        # so the panel must give way to the logo + title instead of pushing
-        # the whole page into a horizontal scroll.
-        width = 640 if mode == "both" else 560
-        self.control_tabs.setMaximumWidth(width + (100 if self._developer_page is not None else 0))
-        self.control_tabs.blockSignals(False)
+    def _update_control_icons(self):
+        for page, resource in self._control_icons.items():
+            self.control_tabs.setTabIcon(self.control_tabs.indexOf(page), theme_icon(resource, self._c.text_secondary))
 
     def _on_control_tab_changed(self, index):
-        if self.control_tabs.widget(index) is self._storage_page:
-            self._refresh_storage()
-
-    def set_home_widget(self, mode: str):
-        if mode not in ("storage", "presets", "both"):
+        page = self.control_tabs.widget(index)
+        action = self._control_actions.get(page)
+        if action is None:
+            self._last_control_page = page
             return
-        self.window.settings.setValue("home_widget", mode)
-        self.window._sync_settings()
-        self._apply_home_widget()
-        selected = self._storage_page if mode == "storage" else self._presets_page
-        self.control_tabs.setCurrentWidget(selected)
-        if mode in ("presets", "both"):
-            self.refresh_preset_widget()
-        if mode in ("storage", "both"):
-            self._refresh_storage()
+        self.control_tabs.blockSignals(True)
+        self.control_tabs.setCurrentWidget(self._last_control_page)
+        self.control_tabs.blockSignals(False)
+        QTimer.singleShot(0, action)
 
     def refresh_preset_widget(self):
         """Keep the top-bar preset card's subtitle in sync."""
@@ -828,6 +1061,8 @@ class IOSHomePage(QWidget):
     def _make_card(self, title: str, subtitle: str, page_index: int) -> IOSCard:
         """One home feature tile: a big themed icon with the name below it."""
         card = _TileCard()
+        card.setProperty('liquidHomeCard',True)
+        card.setMaximumWidth(180)
         card.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Preferred)
 
@@ -837,9 +1072,11 @@ class IOSHomePage(QWidget):
         card_layout.setAlignment(Qt.AlignHCenter)
 
         icon_res = FEATURE_ICONS.get(title, ":/icon/compass.svg")
-        icon_lbl = QLabel(card)
-        icon_lbl.setFixedSize(self.TILE_ICON_PX, self.TILE_ICON_PX)
+        from src.gui.liquid.controls import MagnifyingArtwork
+        icon_lbl = MagnifyingArtwork(card)
+        icon_lbl.setFixedSize(140, 128)
         icon_lbl.setAlignment(Qt.AlignCenter)
+        card._home_artwork_motion=icon_lbl
         # transparent, so the label never paints the palette window color over
         # the tile (see the home_tile_* styles)
         icon_lbl.setStyleSheet("background-color: transparent;")
@@ -867,9 +1104,83 @@ class IOSHomePage(QWidget):
         card.setCursor(Qt.PointingHandCursor)
         return card
 
+    def _make_catalog_row(self) -> IOSCard:
+        """The Community Catalog entry: icon, name and caption on one line."""
+        card = _TileCard()
+        card.setProperty('liquidCatalog',True)
+        row = QHBoxLayout(card)
+        row.setContentsMargins(16, 10, 16, 10)
+        row.setSpacing(12)
+        self._catalog_icon = QLabel(card)
+        self._catalog_icon.setFixedSize(38, 38)
+        self._catalog_icon.setStyleSheet("background-color: transparent;")
+        row.addWidget(self._catalog_icon)
+        self._catalog_title = QLabel(QCoreApplication.translate("Nugget", "Community Catalog"), card)
+        row.addWidget(self._catalog_title)
+        self._catalog_caption = QLabel(
+            QCoreApplication.translate("Nugget", "Presets & templates from the community"), card)
+        row.addWidget(self._catalog_caption, 1)
+        self._catalog_chevron = QLabel("›", card)
+        row.addWidget(self._catalog_chevron)
+        card.mousePressEvent = lambda e: self.switch_to_ios_page(13)
+        card.setCursor(Qt.PointingHandCursor)
+        self._paint_catalog_row()
+        QTimer.singleShot(0, self.refresh_catalog_badge)
+        return card
+
+    def refresh_catalog_badge(self):
+        """Mention catalog updates for imported presets and added templates,
+        counted against the cached catalog (no download)."""
+        text = QCoreApplication.translate("Nugget", "Presets & templates from the community")
+        try:
+            from src.controllers import preset_catalog
+            from src.controllers.preset_manager import PresetManager
+            data, _saved_at = preset_catalog.read_cache()
+            if data is not None:
+                pm = getattr(getattr(self.window, "ios_presets", None), "preset_manager", None) or PresetManager()
+                entries, templates, _ = preset_catalog.parse_catalog(data, pm._valid_import_structure)
+                updates = preset_catalog.count_updates(entries + templates, preset_catalog.installed_items(pm))
+                if updates:
+                    text = QCoreApplication.translate("Nugget", "{0} update(s) available").format(updates)
+        except Exception:
+            pass
+        self._catalog_caption.setText(text)
+
+    def _paint_catalog_row(self):
+        if not hasattr(self, "_catalog_icon"):
+            return
+        self._catalog_icon.setPixmap(theme_pixmap(
+            FEATURE_ICONS["Community Catalog"], self._c.text_primary, 38, self.devicePixelRatioF()))
+        self._catalog_title.setStyleSheet(t("home_tile_title") + "font-size: 18px;")
+        self._catalog_caption.setStyleSheet(t("home_tile_subtitle") + "font-size: 14px;")
+        self._catalog_chevron.setStyleSheet(t("home_tile_subtitle") + "font-size: 20px;")
+
     def _paint_tile_icon(self, label: QLabel, icon_res: str):
         """Draw a feature icon at tile size (and screen density) in the
         current text color."""
-        label.setPixmap(theme_pixmap(
-            icon_res, self._c.text_primary, self.TILE_ICON_PX,
-            self.devicePixelRatioF()))
+        dpr = self.devicePixelRatioF()
+        sizes = {
+            FEATURE_ICONS["Passcode Theme"]: 126,
+            FEATURE_ICONS["Status Bar"]: 138,
+            FEATURE_ICONS["Icon Themes"]: 120,
+            FEATURE_ICONS["Daemons"]: 126,
+            FEATURE_ICONS["Tweaks"]: 126,
+            FEATURE_ICONS["PosterBoard"]: 126,
+        }
+        artwork = theme_pixmap(icon_res, self._c.text_primary,
+                               sizes.get(icon_res, 100), dpr)
+        offsets = {
+            FEATURE_ICONS["Tweaks"]: -14,
+            FEATURE_ICONS["Icon Themes"]: 9,
+        }
+        offset = offsets.get(icon_res, 0)
+        canvas = QPixmap(round(label.width() * dpr), round(label.height() * dpr))
+        canvas.setDevicePixelRatio(dpr)
+        canvas.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(canvas)
+        width = artwork.width() / artwork.devicePixelRatioF()
+        height = artwork.height() / artwork.devicePixelRatioF()
+        painter.drawPixmap(round((label.width() - width) / 2 + offset),
+                           round((label.height() - height) / 2), artwork)
+        painter.end()
+        label.setPixmap(canvas)

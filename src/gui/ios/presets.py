@@ -7,7 +7,9 @@ from PySide6.QtWidgets import (
 )
 
 from src.controllers.preset_manager import PresetManager
-from src.gui.ios.components import IOSSectionHeader, IOSCard, IOSSwitch, IOSPrimaryButton
+from src.gui.widgets import (
+    IOSSectionHeader, IOSCard, IOSSwitch, IOSPrimaryButton,
+)
 from src.gui.ios.preset_menu import (
     load_preset_flow, save_preset_flow, delete_preset_flow,
     export_preset_flow, partial_export_preset_flow, import_preset_flow,
@@ -249,6 +251,10 @@ class IOSPresetsPage(QWidget):
             self.refresh()
 
     def _browse_catalog(self):
+        show = getattr(self.window, "show_ios_page", None)
+        if show is not None and hasattr(self.window, "ios_catalog"):
+            show(self.window.ios_pages.indexOf(self.window.ios_catalog))
+            return
         from src.gui.dialogs.preset_catalog import browse_catalog_flow
         if browse_catalog_flow(self, self.preset_manager, self.window):
             self.refresh()

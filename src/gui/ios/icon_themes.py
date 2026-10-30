@@ -8,7 +8,9 @@ from PySide6.QtWidgets import (
     QLineEdit, QMessageBox,
 )
 
-from src.gui.ios.components import IOSCard
+from src.gui.widgets import (
+    IOSCard,
+)
 from src.gui.dialogs.confirmation import ask_confirmation
 from src.gui.theme import ColorThemeManager, theme_icon, t
 from src.gui.dialogs.icon_pack_downloader import IconPackDownloaderDialog
@@ -108,8 +110,14 @@ class IOSIconThemesPage(QWidget):
         footer_layout.addWidget(maintenance)
         layout.addWidget(footer)
 
+        self._themes_dirty = True
+        self._cards_theme_revision = -1
         self._retheme()
-        self.refresh_themes()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._themes_dirty:
+            self._build_theme_cards()
 
     def _reset_themes(self):
         reply = ask_confirmation(self.window,
@@ -133,7 +141,7 @@ class IOSIconThemesPage(QWidget):
         self._add_btn.setStyleSheet(t("primary_button") + "QPushButton { padding: 0px 16px; font-size: 14px; }")
         self._scroll.setStyleSheet(
             f"background-color: {c.bg_primary}; border: none;")
-        self._hint.setStyleSheet(f"color: {c.text_secondary}; font-size: 13px; background-color: transparent;")
+        self._hint.setStyleSheet(f"color: {c.text_secondary}; font-size: 13px;")
         self._download_btn.setStyleSheet(f"""
             QPushButton#downloadIconPacks {{
                 background-color: {c.bg_secondary};
@@ -159,16 +167,24 @@ class IOSIconThemesPage(QWidget):
             QPushButton#appsOnIphone:hover {{ background-color: {c.surface_hover}; }}
         """)
         self.themes_placeholder.setStyleSheet(
-            f"color: {c.text_secondary}; font-size: 15px; padding: 24px 0; background-color: transparent;")
+            f"color: {c.text_secondary}; font-size: 15px; padding: 24px 0;")
         self._reset_btn.setStyleSheet(t("maintenance_button"))
         self._reset_caption.setStyleSheet(
-            f"color: {c.text_secondary}; font-size: 12px; background-color: transparent;")
+            f"color: {c.text_secondary}; font-size: 12px;")
         # Rebuild the theme cards so their hardcoded label colors follow the
         # current palette too.
-        if hasattr(self, "_themes_box"):
+        if (hasattr(self, "_themes_box")
+                and self._cards_theme_revision != ColorThemeManager.instance().revision):
             self.refresh_themes()
 
     def refresh_themes(self):
+        self._themes_dirty = True
+        if self.isVisible():
+            self._build_theme_cards()
+
+    def _build_theme_cards(self):
+        self._themes_dirty = False
+        self._cards_theme_revision = ColorThemeManager.instance().revision
         tweak = tweaks[TweakID.IconThemes]
         themes = tweak.themes
         self.themes_placeholder.setVisible(not themes)
@@ -215,12 +231,12 @@ class IOSIconThemesPage(QWidget):
         text_col = QVBoxLayout()
         text_col.setSpacing(2)
         bundle_lbl = QLabel(theme.bundle_id)
-        bundle_lbl.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {c.text_primary}; background-color: transparent;")
+        bundle_lbl.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {c.text_primary};")
         bundle_lbl.setWordWrap(True)
         text_col.addWidget(bundle_lbl)
         name_text = theme.display_name if theme.display_name else QCoreApplication.translate("Nugget", "Hide label")
         name_lbl = QLabel(name_text)
-        name_lbl.setStyleSheet(f"font-size: 12px; color: {c.text_secondary}; background-color: transparent;")
+        name_lbl.setStyleSheet(f"font-size: 12px; color: {c.text_secondary};")
         name_lbl.setWordWrap(True)
         text_col.addWidget(name_lbl)
         row.addLayout(text_col, 1)
@@ -290,7 +306,6 @@ class IconThemeDialog(QDialog):
     def __init__(self, parent=None, bundle_id: str = "",
                  display_name: str = "", preset: bool = False):
         super().__init__(parent)
-        ColorThemeManager.instance().theme_changed.connect(self._retheme)
         self.setWindowTitle(QCoreApplication.translate("Nugget", "Add Icon Theme"))
         self.setModal(True)
         self.setMinimumWidth(380)

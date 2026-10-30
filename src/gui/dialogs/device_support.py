@@ -7,14 +7,17 @@ from PySide6.QtWidgets import (
 from src.controllers.hotload import HotLoad
 from src.gui.ios.compat import compatibility_reasons
 from src.devicemanagement.passcode_support import current_passcode_theme_reason
+from src.devicemanagement.device_capabilities import device_os_text
 from src.gui.theme import ColorThemeManager, t
-from src.gui.ios.components import IOSCard, IOSCollapsibleSection
+from src.gui.widgets import (
+    IOSCard, IOSCollapsibleSection,
+)
 from src.tweaks.registry import SPECS
 from src.tweaks.tweak_names import TweakID
 
 
 def support_report(manager):
-    tr = lambda text: QCoreApplication.translate("Nugget", text)
+    tr = lambda text: device_os_text(QCoreApplication.translate("Nugget", text), model)
     version = manager.get_current_device_version() or ""
     model = manager.get_current_device_model() or ""
     safety = HotLoad(manager.pref_manager.settings)
@@ -114,6 +117,7 @@ def support_lines(manager):
 class DeviceSupportDialog(QDialog):
     def __init__(self, manager, parent=None):
         super().__init__(parent)
+        self._model = manager.get_current_device_model()
         self.setWindowTitle(self._tr("Device Compatibility"))
         self.setMinimumWidth(520)
         self.resize(700, 660)
@@ -228,9 +232,8 @@ class DeviceSupportDialog(QDialog):
         ColorThemeManager.instance().theme_changed.connect(self._retheme)
         self._retheme()
 
-    @staticmethod
-    def _tr(text):
-        return QCoreApplication.translate("Nugget", text)
+    def _tr(self, text):
+        return device_os_text(QCoreApplication.translate("Nugget", text), self._model)
 
     @staticmethod
     def _label(text, name):

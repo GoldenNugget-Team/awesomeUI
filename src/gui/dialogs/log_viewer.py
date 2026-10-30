@@ -4,8 +4,8 @@ Backed by the single rotating session file that
 ``src/controllers/nugget_logger.py`` owns, so this is the same text a bug
 report gets. Two things make it useful while an apply is running:
 
-* it **tails**: a QTimer re-reads the file every second and only replaces
-  the view when the size actually changed, and the scroll position is
+* it **tails**: a QTimer polls file identity and size every second and only
+  changes the view when the text changed, and the scroll position is
   preserved unless the user is already parked at the bottom (then it sticks
   there, like a terminal);
 * it **filters**: a level floor (All / Info / Warning / Error) plus a
@@ -30,12 +30,15 @@ import os
 from PySide6.QtCore import QCoreApplication, QTimer, Qt, QUrl, QT_TRANSLATE_NOOP
 from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QHBoxLayout, QLabel, QPlainTextEdit,
+    QDialog, QHBoxLayout, QLabel, QPlainTextEdit,
     QPushButton, QVBoxLayout,
 )
 
 from src.controllers.nugget_logger import get_log_path
-from src.gui.ios.components import _auto_retheme, IOSSwitch, IOSSearchField
+from src.gui.liquid.choice_editor import GlassComboBox as QComboBox
+from src.gui.widgets import (
+    _auto_retheme, IOSSwitch, IOSSearchField,
+)
 from src.gui.theme import t
 
 # Newest slice of the log that is ever held in memory. The rotating handler
@@ -252,29 +255,6 @@ class LogViewerDialog(QDialog):
 
     # ---- data ------------------------------------------------------------
 
-    def _read_whole_lines(self, offset: int) -> tuple[str, int]:
-        """Return ``(text, bytes_consumed)`` for the complete lines at *offset*.
-
-        Opened in binary so the offset stays a byte position: ``tell()`` on a
-        text handle would return an opaque cookie. The byte count is measured
-        on the RAW data, never on the decoded string - ``errors="replace"``
-        turns a bad byte into a 3-byte U+FFFD, so re-encoding the text would
-        desync the offset and re-read (or skip) real records.
-        """
-        try:
-            with open(self._path, "rb") as f:
-                f.seek(offset)
-                data = f.read()
-        except OSError:
-            return "", 0
-        end = data.rfind(b"\n")
-        if end == -1:
-            # no complete line yet (or nothing new): consume nothing, so the
-            # next tick re-reads the half-written record instead of losing it
-            return "", 0
-        consumed = end + 1
-        return data[:consumed].decode("utf-8", errors="replace"), consumed
-
     def _export_diagnostics(self):
         from src.controllers.settings import Settings
         from src.gui.dialogs.diagnostics import DiagnosticsDialog
@@ -287,46 +267,39 @@ class LogViewerDialog(QDialog):
 
     def reload(self):
         """Discard the cached buffer and render from scratch."""
-        self._buffer = ""
-        self._offset = 0
+        from src.utils.log_tail import LogTailReader
+        self._tail_reader = LogTailReader(self._path, TAIL_BYTES)
+        self._last_buffer = None
         self._tick()
 
     def _tick(self):
-        """Pull whatever was appended since the last tick."""
-        try:
-            size = os.path.getsize(self._path)
-        except OSError:
-            if self._buffer:
-                self._buffer = ""
-                self._render([])
+        """Poll the Qt-free tail; render only after the buffer changes."""
+        from src.utils.log_tail import LogTailReader
+        reader = getattr(self, "_tail_reader", None)
+        if reader is None:
+            reader = self._tail_reader = LogTailReader(self._path, TAIL_BYTES)
+        snapshot = reader.poll()
+        self._buffer, self._offset = snapshot.text, snapshot.offset
+        if not snapshot.available:
+            self._last_buffer = None
+            self._render([])
             self._update_status(0)
             return
-
-        # The rotating handler renames the file aside and starts a new one at
-        # the same path, so a shrinking size means rotation: start over.
-        if size < self._offset:
-            self._buffer = ""
-            self._offset = 0
-
-        if size > self._offset:
-            chunk, consumed = self._read_whole_lines(self._offset)
-            self._buffer += chunk
-            self._offset += consumed
-            if len(self._buffer) > TAIL_BYTES:
-                self._buffer = self._buffer[-TAIL_BYTES:]
-
-        lines = self._buffer.splitlines()
-        if len(lines) > MAX_LINES:
-            lines = lines[-MAX_LINES:]
-            self._buffer = "\n".join(lines)
-        self._render(lines)
+        if getattr(self, "_last_buffer", None) == self._buffer:
+            self._update_status(getattr(self, "_last_shown", 0))
+            return
+        self._last_buffer = self._buffer
+        self._render(self._buffer.splitlines()[-MAX_LINES:])
 
     def _render(self, lines: list[str]):
         shown = filter_lines(
             lines, self._level_combo.currentData() or 0,
             self._search.text())
         text = "\n".join(shown)
-        if text == self._view.toPlainText():
+        old_text = getattr(self, "_rendered_text", None)
+        self._last_shown = len(shown)
+        self._buffer_line_count = len(lines)
+        if text == old_text:
             self._update_status(len(shown))
             return
 
@@ -334,7 +307,11 @@ class LogViewerDialog(QDialog):
         # Sticking to the bottom is the terminal behaviour and is what the
         # "Live" switch promises; anyone who scrolled up keeps their place.
         at_bottom = bar.value() >= bar.maximum() - 2
-        self._view.setPlainText(text)
+        if old_text and text.startswith(old_text + "\n"):
+            self._view.appendPlainText(text[len(old_text) + 1:])
+        else:
+            self._view.setPlainText(text)
+        self._rendered_text = text
         if at_bottom:
             bar.setValue(bar.maximum())
         self._update_status(len(shown))
@@ -350,7 +327,7 @@ class LogViewerDialog(QDialog):
             size = 0
         if shown:
             status = QCoreApplication.translate("Nugget", "{0} of {1} lines  -  {2} KB on disk").format(
-                f"{shown:,}", f"{len(self._buffer.splitlines()):,}",
+                f"{shown:,}", f"{getattr(self, '_buffer_line_count', 0):,}",
                 f"{size // 1024:,}")
         else:
             status = QCoreApplication.translate("Nugget", "Empty log  -  {0} KB on disk").format(

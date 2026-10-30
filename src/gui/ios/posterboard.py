@@ -7,9 +7,12 @@ from PySide6.QtWidgets import (
     QCheckBox, QComboBox
 )
 from PySide6.QtGui import QPixmap, QIcon, QImageReader
+from src.gui.liquid.choice_editor import GlassComboBox as QComboBox
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
-from src.gui.ios.components import IOSCard, IOSPrimaryButton, IOSSwitch
+from src.gui.widgets import (
+    IOSCard, IOSPrimaryButton, IOSSwitch,
+)
 from src.gui.theme import ColorThemeManager, t, theme_pixmap
 from src.tweaks.tweaks import tweaks, TweakID
 
@@ -29,6 +32,7 @@ class TendieRow(IOSCard):
 
     def __init__(self, page, tendie, parent=None):
         super().__init__(parent)
+        self._page = page
         self.tendie = tendie
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumHeight(72)
@@ -96,12 +100,29 @@ class TendieRow(IOSCard):
         # IOSCard.__init__ already connected _retheme to theme_changed; restyle
         # now that the child widgets exist.
         self._retheme()
+        self._update_conversion_ui()
+
+    def _conversion_supported(self) -> bool:
+        version = self._page.window.device_manager.get_current_device_version()
+        return tweaks[TweakID.PosterBoard]._legacy_convert_supported(version)
+
+    def _update_conversion_ui(self):
+        if self.convert_switch is not None:
+            supported = self._conversion_supported()
+            self.convert_switch.setVisible(supported)
+            self.convert_lbl.setVisible(supported)
+        self.format_lbl.setText(self._format_caption())
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Rows survive device changes; recheck the currently selected iPhone.
+        self._update_conversion_ui()
 
     def _format_caption(self) -> str:
         posterboard = tweaks[TweakID.PosterBoard]
         if not posterboard.tendie_needs_conversion(self.tendie):
             return QCoreApplication.translate("Nugget", "Modern format")
-        if posterboard.tendie_convert_enabled(self.tendie):
+        if self._conversion_supported() and posterboard.tendie_convert_enabled(self.tendie):
             return QCoreApplication.translate("Nugget", "Converts to the modern format")
         return QCoreApplication.translate("Nugget", "Installs as is")
 
@@ -183,13 +204,13 @@ class IOSPosterboardPage(QWidget):
         self.tendies_page = self._create_tendies_tab()
         self.tab_stack.addWidget(self.tendies_page)
 
-        # Templates tab
-        self.templates_page = self._create_templates_tab()
-        self.tab_stack.addWidget(self.templates_page)
-
         # Video tab
         self.video_page = self._create_video_tab()
         self.tab_stack.addWidget(self.video_page)
+        from src.gui.ios.tweaks import IOSSectionPage
+        from src.tweaks.registry import Section
+        self.preferences_page=IOSSectionPage(window,Section.POSTERBOARD)
+        self.tab_stack.addWidget(self.preferences_page)
 
         # Tab bar on top, sharing its row with "Check Package…": a mobile-style
         # bottom bar sat in the middle of the window, above the reset footer,
@@ -202,12 +223,12 @@ class IOSPosterboardPage(QWidget):
         tab_layout.setSpacing(4)
 
         self.tendies_tab_btn = self._make_tab_button(QCoreApplication.translate("Nugget", "Tendies"), ":/icon/wallpaper.svg", 0)
-        self.templates_tab_btn = self._make_tab_button(QCoreApplication.translate("Nugget", "Templates"), ":/icon/photo-stack.svg", 1)
-        self.video_tab_btn = self._make_tab_button(QCoreApplication.translate("Nugget", "Video"), ":/icon/play-circle.svg", 2)
+        self.video_tab_btn = self._make_tab_button(QCoreApplication.translate("Nugget", "Video"), ":/icon/play-circle.svg", 1)
 
         tab_layout.addWidget(self.tendies_tab_btn)
-        tab_layout.addWidget(self.templates_tab_btn)
         tab_layout.addWidget(self.video_tab_btn)
+        self.preferences_tab_btn=self._make_tab_button(self.tr('Preferences'),':/icon/wallpaper.svg',2)
+        tab_layout.addWidget(self.preferences_tab_btn)
         tab_layout.addStretch()
         tab_layout.addWidget(self._check_btn)
 
@@ -235,7 +256,7 @@ class IOSPosterboardPage(QWidget):
         self._tab_bar.setStyleSheet(
             f"QWidget#pbTabBar {{ background-color: {c.bg_primary}; }}"
         )
-        for btn in (self.tendies_tab_btn, self.templates_tab_btn, self.video_tab_btn):
+        for btn in (self.tendies_tab_btn, self.video_tab_btn,self.preferences_tab_btn):
             btn.setStyleSheet(f"""
                 QToolButton {{
                     background: transparent;
@@ -253,7 +274,6 @@ class IOSPosterboardPage(QWidget):
                 }}
             """)
         self._retheme_tendies_tab()
-        self._retheme_templates_tab()
         self._retheme_video_tab()
         self._update_tab_icons()
 
@@ -296,16 +316,6 @@ class IOSPosterboardPage(QWidget):
                 f"font-size: 26px; color: {c.text_secondary}; background-color: transparent;"
             )
 
-    def _retheme_templates_tab(self):
-        c = ColorThemeManager.instance().colors
-        if hasattr(self, '_templates_scroll'):
-            self._templates_scroll.setStyleSheet(
-                f"background-color: {c.bg_primary}; border: none;"
-            )
-        if hasattr(self, 'templates_placeholder'):
-            self.templates_placeholder.setStyleSheet(
-                f"font-size: 15px; color: {c.text_secondary}; background-color: transparent;"
-            )
 
     def _retheme_video_tab(self):
         c = ColorThemeManager.instance().colors
@@ -367,13 +377,13 @@ class IOSPosterboardPage(QWidget):
     def _switch_tab(self, index: int):
         self.tab_stack.setCurrentIndex(index)
         self.tendies_tab_btn.setChecked(index == 0)
-        self.templates_tab_btn.setChecked(index == 1)
-        self.video_tab_btn.setChecked(index == 2)
+        self.video_tab_btn.setChecked(index == 1)
+        self.preferences_tab_btn.setChecked(index == 2)
         self._update_tab_icons()
 
     def _update_tab_icons(self):
         c = ColorThemeManager.instance().colors
-        for button in (self.tendies_tab_btn, self.templates_tab_btn, self.video_tab_btn):
+        for button in (self.tendies_tab_btn, self.video_tab_btn,self.preferences_tab_btn):
             color = c.accent if button.isChecked() else c.text_secondary
             button.setIcon(QIcon(theme_pixmap(button.property('icon_resource'), color, 18, self.devicePixelRatioF())))
 
@@ -397,7 +407,6 @@ class IOSPosterboardPage(QWidget):
         return self._tendies_scroll
 
     def _create_download_card(self) -> QWidget:
-        c = ColorThemeManager.instance().colors
         card = IOSCard()
         card.setCursor(Qt.PointingHandCursor)
         card.setMinimumHeight(88)
@@ -458,68 +467,8 @@ class IOSPosterboardPage(QWidget):
 
         return card
 
-    def _create_templates_tab(self) -> QWidget:
-        self._templates_scroll = QScrollArea()
-        self._templates_scroll.setWidgetResizable(True)
-        self._templates_scroll.setFrameStyle(QScrollArea.NoFrame)
-
-        content = QWidget()
-        self.templates_layout = QVBoxLayout(content)
-        self.templates_layout.setContentsMargins(16, 16, 16, 32)
-        self.templates_layout.setSpacing(12)
-        self.templates_layout.setAlignment(Qt.AlignTop)
-        self._templates_scroll.setWidget(content)
-
-        import_btn = IOSPrimaryButton(QCoreApplication.translate("Nugget", "  Import Templates (.batter)"))
-        import_btn.clicked.connect(self.show_add_templates_dialog)
-        self.templates_import_btn = import_btn
-        self.templates_layout.addWidget(import_btn)
-
-        self.templates_placeholder = QLabel(QCoreApplication.translate("Nugget", "No templates added yet"))
-        self.templates_placeholder.setAlignment(Qt.AlignCenter)
-        self.templates_layout.addWidget(self.templates_placeholder)
-
-        self._load_templates_list()
-
-        return self._templates_scroll
-
-    def show_add_templates_dialog(self):
-        from PySide6.QtWidgets import QFileDialog, QMessageBox
-        selected_files, _ = QFileDialog.getOpenFileNames(
-            self.window, QCoreApplication.translate("Nugget", "Select Nugget Template Files"), "", "Zip Files (*.batter)"
-        )
-        if selected_files:
-            templates_tweak = tweaks[TweakID.Templates]
-            try:
-                device_version = self.window.device_manager.get_current_device_version()
-            except Exception:
-                device_version = None
-            for file in selected_files:
-                try:
-                    templates_tweak.add_template(file, device_version)
-                except Exception as e:
-                    QMessageBox.warning(self.window, QCoreApplication.translate("Nugget", "Import Failed"), QCoreApplication.translate("Nugget", "Failed to load template:\n{0}\n\n{1}").format(file, str(e)))
-            self._load_templates_list()
-
-    def _load_templates_list(self):
-        from src.tweaks.tweaks import tweaks, TweakID
-        templates = tweaks[TweakID.Templates].templates
-        if not templates:
-            self.templates_placeholder.show()
-            return
-        self.templates_placeholder.hide()
-
-        for i in reversed(range(self.templates_layout.count())):
-            widget = self.templates_layout.itemAt(i).widget()
-            if widget is not None and widget not in (self.templates_placeholder, self.templates_import_btn):
-                widget.deleteLater()
-
-        widgets = {}
-        for template in templates:
-            template.create_ui(self.window, tweaks[TweakID.Templates], widgets, self.templates_layout)
 
     def _create_video_tab(self) -> QWidget:
-        c = ColorThemeManager.instance().colors
         self._video_scroll = QScrollArea()
         self._video_scroll.setWidgetResizable(True)
         content = QWidget()
@@ -657,16 +606,21 @@ class IOSPosterboardPage(QWidget):
             return
         try:
             path = os.path.join(directory, f"Nugget-Export-{uuid.uuid4()}")
-            tweaks[TweakID.PosterBoard].create_video_loop_files(output_dir=path)
             zip_path = path + ".tendies"
-            make_archive(path, 'zip', path)
-            os.rename(path + '.zip', zip_path)
-            rmtree(path)
+            from src.gui.dialogs.file_task import run_file_task
+            def export():
+                try:
+                    tweaks[TweakID.PosterBoard].create_video_loop_files(output_dir=path)
+                    make_archive(path, 'zip', path)
+                    os.rename(path + '.zip', zip_path)
+                finally:
+                    rmtree(path, ignore_errors=True)
+            run_file_task(self.window, QCoreApplication.translate("Nugget", "Export Video"), export)
             print(f"Created at {zip_path}")
             if os.name == 'nt':
                 subprocess.Popen(f'explorer "{os.path.normpath(zip_path)}"')
             else:
-                subprocess.call(["open", '-R', zip_path])
+                subprocess.Popen(["open", '-R', zip_path])
         except Exception as e:
             QMessageBox.critical(
                 self.window, QCoreApplication.translate("QtCore.QCoreApplication", "Error!"),
@@ -686,7 +640,8 @@ class IOSPosterboardPage(QWidget):
         dialog.exec()
 
     def show_add_tendies_dialog(self):
-        from PySide6.QtWidgets import QFileDialog
+        from zipfile import BadZipFile
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
         selected_files, _ = QFileDialog.getOpenFileNames(
             self.window, QCoreApplication.translate("Nugget", "Select PosterBoard Files"), "", "Zip Files (*.tendies)"
         )
@@ -696,8 +651,19 @@ class IOSPosterboardPage(QWidget):
             except Exception:
                 device_version = None
             for file in selected_files:
-                if not tweaks[TweakID.PosterBoard].add_tendie(file, device_version):
-                    break
+                try:
+                    if not tweaks[TweakID.PosterBoard].add_tendie(file, device_version):
+                        break
+                except (BadZipFile, OSError, ValueError) as error:
+                    message = (QCoreApplication.translate(
+                        "Nugget", "This file is not a valid wallpaper ZIP archive. "
+                        "It may be incomplete or damaged. Download the original "
+                        ".tendies file again; renaming another file will not convert it.")
+                        if isinstance(error, BadZipFile) else str(error))
+                    QMessageBox.warning(
+                        self.window,
+                        QCoreApplication.translate("Nugget", "Import Failed"),
+                        os.path.basename(file) + "\n\n" + message)
             self.refresh_tendies()
 
     def refresh_tendies(self):

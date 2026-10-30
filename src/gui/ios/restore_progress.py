@@ -2,10 +2,13 @@
 import re
 
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QSizePolicy
 
-from src.gui.ios.components import IOSCard
+from src.devicemanagement.device_capabilities import device_text
+from src.gui.widgets import IOSCard
 from src.gui.theme import ColorThemeManager, t, theme_pixmap
+from src.gui.ios.feature_icons import FEATURE_ICONS
 
 _STAGES = {
     "prepare": ("Preparing files", ":/icon/gear.svg"),
@@ -31,12 +34,15 @@ def _tr(text):
 
 
 class RestoreProgressCard(IOSCard):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, compact=False):
         super().__init__(parent)
+        self._compact = compact
+        self._device_model = ""
         self._stage = "prepare"
         self._category = ""
         self._seen = set()
         self._completed = set()
+        self._skipped = set()
         self._steps = {}
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(400)
@@ -54,7 +60,7 @@ class RestoreProgressCard(IOSCard):
         header.addWidget(self.status_icon, 0, Qt.AlignTop)
         text = QVBoxLayout()
         text.setSpacing(6)
-        self.phase_label = QLabel(_tr("Preparing files"))
+        self.phase_label = QLabel(self._tr("Preparing files"))
         self.phase_label.setObjectName("restorePhase")
         text.addWidget(self.phase_label)
         self.status_label = QLabel()
@@ -74,9 +80,9 @@ class RestoreProgressCard(IOSCard):
         self.bar = QProgressBar()
         self.bar.setTextVisible(False)
         self.bar.setFixedHeight(8)
-        self.bar.setAccessibleName(_tr("Device-reported progress"))
+        self.bar.setAccessibleName(self._tr("Device-reported progress"))
         progress_row.addWidget(self.bar, 1)
-        self.value = QLabel(_tr("Waiting…"))
+        self.value = QLabel(self._tr("Waiting…"))
         self.value.setObjectName("restorePercent")
         self.value.setMinimumWidth(64)
         self.value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -106,26 +112,39 @@ class RestoreProgressCard(IOSCard):
         warning_layout.addWidget(self.connection_icon, 0, Qt.AlignVCenter)
         warning_text = QVBoxLayout()
         warning_text.setSpacing(3)
-        self.hint = QLabel(_tr("Do not disconnect your iPhone"))
+        self.hint = QLabel(self._tr("Do not disconnect your iPhone"))
         self.hint.setObjectName("restoreWarning")
         self.hint.setWordWrap(True)
         warning_text.addWidget(self.hint)
-        detail = QLabel(_tr("Keep the USB cable connected until GoldenNugget confirms the restore is complete."))
+        detail = QLabel(self._tr("Keep the USB cable connected until GoldenNugget confirms the restore is complete."))
+        self.connection_detail = detail
         detail.setObjectName("restoreConnectionDetail")
         detail.setWordWrap(True)
         warning_text.addWidget(detail)
         warning_layout.addLayout(warning_text, 1)
         layout.addWidget(warning)
+        if compact:
+            layout.setContentsMargins(16, 14, 16, 14)
+            layout.setSpacing(10)
+            self.timeline.hide()
+            warning.hide()
         self.start(False)
         self.hide()
 
-    def start(self, protective, finalization=True):
+    def _tr(self, text):
+        return device_text(_tr(text), self._device_model)
+
+    def start(self, protective, finalization=True, device_model=""):
+        self._device_model = device_model
+        self.hint.setText(self._tr("Do not disconnect your iPhone"))
+        self.connection_detail.setText(self._tr("Keep the USB cable connected until GoldenNugget confirms the restore is complete."))
         self._status_timer.stop()
         self._pending_status = ""
         self._stage, self._category = "prepare", ""
         self._combined_restore = False
         self._seen.clear()
         self._completed.clear()
+        self._skipped.clear()
         while self.timeline_layout.count():
             old_step = self.timeline_layout.takeAt(0).widget()
             old_step.hide()
@@ -137,8 +156,8 @@ class RestoreProgressCard(IOSCard):
         for key in stages:
             self._add_step(key, self.timeline_layout.count())
         self.bar.setRange(0, 0)
-        self.value.setText(_tr("Waiting…"))
-        self.status_label.setText(_tr("Waiting for the operation to start."))
+        self.value.setText(self._tr("Waiting…"))
+        self.status_label.setText(self._tr("Waiting for the operation to start."))
         self.eta.clear()
         self.time_row.hide()
         self._retheme()
@@ -154,7 +173,7 @@ class RestoreProgressCard(IOSCard):
         icon = QLabel()
         icon.setFixedSize(24, 24)
         step_layout.addWidget(icon, 0, Qt.AlignHCenter)
-        label = QLabel(_tr(_STAGES[key][0]))
+        label = QLabel(self._tr(_STAGES[key][0]))
         label.setAlignment(Qt.AlignCenter)
         label.setWordWrap(True)
         label.setMinimumWidth(0)
@@ -167,7 +186,18 @@ class RestoreProgressCard(IOSCard):
     def set_stage(self, stage, category=""):
         if stage not in _STAGES:
             return
-        if stage != self._stage and self._stage in self._seen:
+        if category == "skipped":
+            if stage not in self._steps:
+                index = self.timeline_layout.indexOf(self._steps["setup"][0]) if "setup" in self._steps else self.timeline_layout.count()
+                self._add_step(stage, index)
+            self._skipped.add(stage)
+            self._completed.discard(stage)
+            self._refresh_stage()
+            return
+        self._skipped.discard(stage)
+        if stage not in self._steps and stage != "prepare":
+            self._add_step(stage, self.timeline_layout.count())
+        if stage != self._stage and self._stage in self._seen and self._stage not in self._skipped:
             self._completed.add(self._stage)
         if stage == "restore" and "tweaks" not in self._seen and "tweaks" in self._steps:
             self._combined_restore = True
@@ -183,14 +213,14 @@ class RestoreProgressCard(IOSCard):
             self._status_timer.stop()
             self._pending_status = ""
             self.bar.setRange(0, 0)
-            self.value.setText(_tr("Waiting…"))
+            self.value.setText(self._tr("Waiting…"))
         self._stage, self._category = stage, category
         self._seen.add(stage)
         if category in {"restart", "waiting", "authentication"}:
             self.eta.clear()
             self.time_row.hide()
             self.bar.setRange(0, 0)
-            self.value.setText(_tr("Waiting…"))
+            self.value.setText(self._tr("Waiting…"))
         if changed or stage != "backup":
             self._refresh_stage()
         self.show()
@@ -208,8 +238,8 @@ class RestoreProgressCard(IOSCard):
         lines = text.splitlines()
         eta = next((line for line in lines if "Time Left:" in line), "")
         if eta or match or not self.eta.text():
-            self.eta.setText(eta or _tr("Time Left: Finishing this stage…" if match and float(match.group(1)) >= 100 else "Time Left: Calculating…"))
-        self.eta.setToolTip(_tr("Estimate for the current transfer only. Setup and restart can take additional time."))
+            self.eta.setText(eta or self._tr("Time Left: Finishing this stage…" if match and float(match.group(1)) >= 100 else "Time Left: Calculating…"))
+        self.eta.setToolTip(self._tr("Estimate for the current transfer only. Setup and restart can take additional time."))
         self.time_row.setVisible(self._stage in {"backup", "restore", "media"} and self._category not in {"restart", "waiting", "authentication"})
         body = [line for line in lines if line != eta and line.strip() != "DO NOT UNPLUG"]
         self._pending_status = re.sub(r"\s*\(\d+(?:\.\d+)?%\)", "", "\n".join(body))
@@ -229,7 +259,11 @@ class RestoreProgressCard(IOSCard):
         super()._retheme()
         if not hasattr(self, "bar"):
             return
-        self.setStyleSheet(self.styleSheet() + t("restore_progress"))
+        compact_style = ("QLabel#restorePhase { font-size: 15px; font-weight: 600; } "
+                         "QLabel#restoreStatus { font-size: 12px; } "
+                         "QLabel#restorePercent { font-size: 17px; font-weight: 600; } "
+                         "QLabel#restoreTime { font-size: 13px; font-weight: 600; }") if self._compact else ""
+        self.setStyleSheet(self.styleSheet() + t("restore_progress") + compact_style)
         self.bar.setStyleSheet(t("dialog_progress_bar"))
         self.timer_icon.setPixmap(theme_pixmap(
             ":/icon/clock.svg", ColorThemeManager.instance().colors.accent,
@@ -247,14 +281,24 @@ class RestoreProgressCard(IOSCard):
         if self._combined_restore and self._stage == "restore" and self._category not in {"restart", "waiting", "authentication"}:
             title = "Restore data & apply changes"
         if "media" in self._steps and self._stage in {"restore", "media"} and self._category not in {"restart", "waiting", "authentication"}:
-            title = _tr("{0} — stage {1} of 2").format(_tr(title), 1 if self._stage == "restore" else 2)
+            title = self._tr("{0} — stage {1} of 2").format(self._tr(title), 1 if self._stage == "restore" else 2)
         if self._category == "authentication":
             title = "Unlock your iPhone"
-        self.phase_label.setText(_tr(title))
+        self.phase_label.setText(self._tr(title))
         icon = ":/icon/lock.svg" if self._category == "authentication" else _STAGES["backup"][1] if self._stage == "backup" else _CATEGORY_ICONS.get(self._category, _STAGES[self._stage][1])
-        self.status_icon.setPixmap(theme_pixmap(icon, colors.accent, 32, self.devicePixelRatioF()))
+        artwork = {"tweaks": "Tweaks", "wallpaper": "PosterBoard", "statusbar": "Status Bar",
+                   "daemons": "Daemons", "icons": "Icon Themes"}.get(
+            self._category, "Tweaks" if self._stage == "tweaks" else None)
+        if artwork and self._category != "authentication":
+            ratio = self.devicePixelRatioF()
+            pixmap = QPixmap(FEATURE_ICONS[artwork]).scaled(
+                round(32 * ratio), round(32 * ratio), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pixmap.setDevicePixelRatio(ratio)
+            self.status_icon.setPixmap(pixmap)
+        else:
+            self.status_icon.setPixmap(theme_pixmap(icon, colors.accent, 32, self.devicePixelRatioF()))
         for key, (step, icon, label) in self._steps.items():
-            state = "active" if key == self._stage else "complete" if key in self._completed else "pending"
+            state = "skipped" if key in self._skipped else "active" if key == self._stage else "complete" if key in self._completed else "pending"
             if step.property("state") != state:
                 step.setProperty("state", state)
                 step.style().unpolish(step)
@@ -262,4 +306,6 @@ class RestoreProgressCard(IOSCard):
             resource = ":/icon/check-circle.svg" if state == "complete" else _STAGES[key][1]
             color = colors.accent if state == "active" else colors.success if state == "complete" else colors.text_secondary
             icon.setPixmap(theme_pixmap(resource, color, 24, self.devicePixelRatioF()))
-            label.setText(_tr("Restore data & changes") if key == "restore" and self._combined_restore else _tr(_STAGES[key][0]))
+            label.setText(self._tr("Restore data & changes") if key == "restore" and self._combined_restore else self._tr(_STAGES[key][0]))
+            if state == "skipped":
+                label.setText(self._tr("{0} — skipped").format(self._tr(_STAGES[key][0])))

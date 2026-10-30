@@ -1,7 +1,9 @@
-from PySide6.QtCore import Qt, QCoreApplication
+from PySide6.QtCore import Qt, QCoreApplication, QRect
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QScrollArea, QHBoxLayout
 
-from src.gui.ios.components import IOSPrimaryButton
+from src.gui.widgets import (
+    IOSPrimaryButton,
+)
 from src.gui.theme import t, theme_pixmap, ColorThemeManager
 
 
@@ -13,11 +15,12 @@ class ConnectDevicePlaceholder(QWidget):
     theme signal and repaints via :meth:`_retheme`.
     """
 
-    ICON_PX = 120
+    ICON_PX = 88
 
     def __init__(self, window, parent=None):
         super().__init__(parent)
         self.window = window
+        self._connection_action = None
         self.setObjectName("iosContainer")
 
         root = QVBoxLayout(self)
@@ -28,8 +31,8 @@ class ConnectDevicePlaceholder(QWidget):
         self._scroll.setWidget(content)
         root.addWidget(self._scroll)
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(40, 40, 40, 40)
-        layout.setSpacing(18)
+        layout.setContentsMargins(28, 32, 28, 100)
+        layout.setSpacing(14)
         layout.setAlignment(Qt.AlignCenter)
 
         self._icon_lbl = QLabel(self)
@@ -55,7 +58,7 @@ class ConnectDevicePlaceholder(QWidget):
             "2. Unlock it and keep the screen awake.\n"
             "3. Tap Trust on the device if prompted, then check again."))
         self._steps.setWordWrap(True)
-        self._steps.setFixedWidth(650)
+        self._steps.setMaximumWidth(500)
         self._steps.setTextFormat(Qt.PlainText)
         layout.addWidget(self._steps, 0, Qt.AlignHCenter)
 
@@ -83,7 +86,7 @@ class ConnectDevicePlaceholder(QWidget):
             "macOS: check whether the device appears in Finder and confirm Trust.")
         self._help_detail = QLabel(platform_hint + "\n" + QCoreApplication.translate("Nugget",
             "Try another data cable or USB port. Charging alone does not confirm a data connection. Open the log for the exact scan error."))
-        self._help_detail.setFixedWidth(650)
+        self._help_detail.setMaximumWidth(500)
         self._help_detail.setWordWrap(True)
         self._help_detail.setTextFormat(Qt.PlainText)
         self._help_detail.hide()
@@ -91,7 +94,7 @@ class ConnectDevicePlaceholder(QWidget):
         self._scan_status = QLabel()
         self._scan_status.setTextFormat(Qt.PlainText)
         self._scan_status.setWordWrap(True)
-        self._scan_status.setFixedWidth(650)
+        self._scan_status.setMaximumWidth(500)
         self._scan_status.hide()
         layout.addWidget(self._scan_status, 0, Qt.AlignHCenter)
 
@@ -111,7 +114,15 @@ class ConnectDevicePlaceholder(QWidget):
         layout.addWidget(self._continue_btn, 0, Qt.AlignHCenter)
 
         self._retheme()
+        ColorThemeManager.instance().theme_changed.connect(self._retheme)
         self.refresh_dependency_hint()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        width = max(180, min(500, self.width()-80))
+        for label in (self._steps, self._help_detail, self._scan_status):
+            label.setFixedWidth(width)
+        self._fit_help_labels()
 
     def refresh_dependency_hint(self, scan_failed: bool = False):
         """Show the install button when packages are missing, or when a scan
@@ -132,6 +143,23 @@ class ConnectDevicePlaceholder(QWidget):
         except Exception as error:
             self.set_scan_status(str(error), busy=False)
 
+    def set_connection_action(self, action):
+        self._connection_action = action
+        if action == "unlock":
+            self._title.setText(self.tr("Unlock your iPhone or iPad"))
+            self._message.setText(self.tr("Enter the passcode on your device to connect."))
+        elif action == "trust":
+            self._title.setText(self.tr("Trust this computer"))
+            self._message.setText(self.tr("Confirm Trust on your device and enter its passcode if requested."))
+        elif action == "denied":
+            self._title.setText(self.tr("Trust is required"))
+            self._message.setText(self.tr("Reconnect your device and confirm Trust to continue."))
+        else:
+            self._title.setText(self.tr("No device connected"))
+            self._message.setText(self.tr("Connect an Apple device with iOS 26.2+"))
+        self._steps.setVisible(action is None)
+        self._retheme()
+
     def set_scan_status(self, text, busy=False):
         self._scan_status.setText(text)
         self._fit_help_labels()
@@ -140,24 +168,29 @@ class ConnectDevicePlaceholder(QWidget):
         self.refresh_dependency_hint(scan_failed=bool(text))
 
     def _fit_help_labels(self):
-        # QLabel's default minimum hint may allow wrapped text to be clipped
-        # instead of making the scroll content taller.
         for label in (self._steps, self._help_detail, self._scan_status):
-            label.setMinimumHeight(max(0, label.heightForWidth(650)) + 4)
+            margins = label.contentsMargins()
+            width = max(1, label.width() - margins.left() - margins.right())
+            bounds = label.fontMetrics().boundingRect(
+                QRect(0, 0, width, 16777215), Qt.TextWordWrap, label.text())
+            height = bounds.height() + margins.top() + margins.bottom() + 4 if label.text() else 0
+            label.setMinimumHeight(height)
 
     def _retheme(self):
         c = ColorThemeManager.instance().colors
         self.setStyleSheet(t("page_bg"))
         self._scroll.setStyleSheet(t("scroll_area"))
         self._icon_lbl.setPixmap(theme_pixmap(
-            ":/icon/phone.svg", c.text_secondary, self.ICON_PX,
+            ":/icon/lock.svg" if self._connection_action else ":/icon/phone.svg",
+            c.warning if self._connection_action else c.text_secondary, self.ICON_PX,
             self.devicePixelRatioF()))
-        self._title.setStyleSheet(t("home_title"))
-        self._message.setStyleSheet(t("home_subtitle"))
+        self._title.setStyleSheet(f'font-size:26px;font-weight:600;color:{c.text_primary};background:transparent;')
+        self._message.setStyleSheet(f'font-size:14px;color:{c.text_secondary};background:transparent;')
         self._continue_btn.setStyleSheet(t("mini_button"))
         self._diagnostics_btn.setStyleSheet(t("mini_button"))
         self._logs_btn.setStyleSheet(t("mini_button"))
-        self._steps.setStyleSheet(t("home_subtitle"))
-        self._help_detail.setStyleSheet(t("home_subtitle"))
-        self._scan_status.setStyleSheet(t("home_subtitle"))
+        self._steps.setStyleSheet(f'font-size:14px;color:{c.text_secondary};background:transparent;padding:12px 0;')
+        self._help_detail.setStyleSheet(f'font-size:13px;color:{c.text_secondary};background:transparent;')
+        self._scan_status.setAlignment(Qt.AlignCenter)
+        self._scan_status.setStyleSheet(f'font-size:13px;color:{c.text_primary};background:{c.bg_secondary};border-radius:8px;padding:12px;')
         self._fit_help_labels()

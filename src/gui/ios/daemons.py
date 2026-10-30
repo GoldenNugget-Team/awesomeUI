@@ -1,20 +1,39 @@
 from PySide6.QtCore import (
-    QTimer, QCoreApplication, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup,
+    Qt, QSize, QTimer, QCoreApplication, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup,
 )
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QScrollArea, QHBoxLayout, QLabel, QMessageBox,
-    QGraphicsOpacityEffect, QSizePolicy,
+    QGraphicsOpacityEffect, QSizePolicy, QFrame, QPushButton,
 )
 
-from src.gui.ios.components import IOSCard, IOSSectionHeader, IOSSwitch, IOSSearchField, IOSSearchEmpty, IOSSettingsAction
-from src.gui.theme import ColorThemeManager
+from src.gui.ios.components import IOSCard, IOSSectionHeader, IOSSwitch, IOSSearchField, IOSSearchEmpty, IOSSegmentedFilter, IOSSettingsAction
+from PySide6.QtGui import QIcon
+from src.controllers.favorites import TweakFavorites
+from src.gui.theme import ColorThemeManager, theme_pixmap, theme_icon, t
 from src.tweaks.tweaks import tweaks, TweakID
 from src.tweaks.tweak_loader import load_daemons
-from src.tweaks.daemons_tweak import Daemon, RECOMMENDED_ANALYTICS, NOTIFICATION_RECOVERY_DAEMONS
+from src.tweaks.daemon_descriptions import DAEMON_DESCRIPTIONS
+from src.tweaks.daemons_tweak import Daemon, NOTIFICATION_RECOVERY_DAEMONS
+
+ANALYTICS_DAEMONS = (Daemon.AnalyticsHelper, Daemon.WifiAnalytics, Daemon.UsageTrackingAgent,
+                     Daemon.AppleAds, Daemon.SettingsStats, Daemon.AudioAnalytics,
+                     Daemon.EcosystemAnalytics, Daemon.CallAnalytics, Daemon.Feedback, Daemon.Metrics)
 from src.controllers.hotload import HotLoad, confirm_flagged
 
 # QWIDGETSIZE_MAX — PySide6 does not export the C macro, this is its value.
 _NO_MAX_HEIGHT = 16777215
+
+_ROW_SPACING = 12
+_FAVORITE_SIZE = 44
+_INFO_SIZE = 36
+
+
+def _reserve_action_space(layout):
+    space = QWidget()
+    space.setFixedSize(_FAVORITE_SIZE + _ROW_SPACING + _INFO_SIZE, _FAVORITE_SIZE)
+    space.setAttribute(Qt.WA_TransparentForMouseEvents)
+    space.setStyleSheet("background: transparent;")
+    layout.addWidget(space)
 
 
 class _DaemonRows(QWidget):
@@ -154,9 +173,25 @@ class IOSDaemonsContent(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 32)
         layout.setSpacing(10)
+        layout.setAlignment(Qt.AlignTop)
 
+        from src.gui.ios.viewport_rows import ViewportRows
+        self._viewport_rows = ViewportRows(self)
+        self._favorites = TweakFavorites.instance()
+        self._favorite_buttons = {}
         self.search = IOSSearchField(self)
-        layout.addWidget(self.search)
+        self.search.setPlaceholderText(self.tr("Search daemons…"))
+        self.filter_control = IOSSegmentedFilter([
+            (self.tr("All"), "all"), (self.tr("Enabled"), "enabled"),
+            (self.tr("Disabled"), "disabled"),
+            (self.tr("Favorites"), "favorites")], self)
+        self.filter_control.setAccessibleName(self.tr("Daemon filter"))
+        search_row = QHBoxLayout()
+        search_row.addWidget(self.search, 1)
+        search_row.addWidget(self.filter_control)
+        layout.addLayout(search_row)
+        self.filter_control.currentIndexChanged.connect(self._apply_search)
+        self._favorites.changed.connect(self._refresh_favorites)
 
         # Master enable switch
         layout.addWidget(IOSSectionHeader(
@@ -165,16 +200,25 @@ class IOSDaemonsContent(QWidget):
         master_card = IOSCard()
         master_row = QHBoxLayout(master_card)
         master_row.setContentsMargins(16, 12, 16, 12)
-        master_row.setSpacing(12)
+        master_row.setSpacing(_ROW_SPACING)
         c = ColorThemeManager.instance().colors
         master_label = QLabel(QCoreApplication.translate("Nugget", "Enable Daemon Modifications"))
         master_label.setWordWrap(True)
-        master_label.setStyleSheet(f"color: {c.text_primary}; font-size: 15px; background-color: transparent;")
+        master_label.setStyleSheet(f"color: {c.text_primary}; font-size: 15px;")
         self._master_label = master_label
-        master_row.addWidget(master_label, 1)
+        master_text = QVBoxLayout()
+        master_text.setSpacing(4)
+        master_text.addWidget(master_label)
+        master_detail = QLabel(self.tr("Each switch below stops a background service when you apply. Turning this master switch off does not undo changes already on the device."))
+        master_detail.setWordWrap(True)
+        master_detail.setProperty("daemonInformation", True)
+        master_detail.setStyleSheet(f"color: {c.text_secondary}; font-size: 13px;")
+        master_text.addWidget(master_detail)
+        master_row.addLayout(master_text, 1)
         self.master_switch = IOSSwitch(self.daemons_tweak.enabled)
         self.master_switch.toggled.connect(self._on_master_toggled)
         master_row.addWidget(self.master_switch)
+        _reserve_action_space(master_row)
         layout.addWidget(master_card)
 
         # Shown while the master switch is off: without it the page is just a
@@ -199,34 +243,14 @@ class IOSDaemonsContent(QWidget):
 
         # Everything that acts on daemons lives in one block that the master
         # switch unrolls / folds away, so those rows only exist on screen while
-        # daemon modifications are actually on. The Recommended shortcut is the
-        # first row of that block: leaving it on screen next to a hidden list
-        # would just look broken. The forced-by-HotLoad rows are in here too;
-        # hiding them changes nothing safety-wise, because
-        # _apply_hotload_daemon_forcing injects those keys at apply time no
-        # matter what the switches (or a preset) say.
+        # daemon modifications are actually on. HotLoad safety rules still apply independently.
         self._rows = _DaemonRows(self)
         layout.addWidget(self._rows)
 
-        # Recommended only includes the curated analytics/diagnostics set.
-        self.recommended_card = IOSCard()
-        recommended_row = QHBoxLayout(self.recommended_card)
-        recommended_row.setContentsMargins(16, 12, 16, 12)
-        recommended_row.setSpacing(12)
-        self._recommended_label = QLabel(QCoreApplication.translate(
-            "Nugget", "Recommended (analytics, tracking & logging)"))
-        self._recommended_label.setWordWrap(True)
-        self._recommended_label.setStyleSheet(
-            f"color: {c.text_primary}; font-size: 15px; font-weight: 600; background-color: transparent;")
-        recommended_row.addWidget(self._recommended_label, 1)
-        self.recommended_switch = IOSSwitch(self._recommended_all_on())
-        self.recommended_switch.toggled.connect(self._on_recommended_toggled)
-        recommended_row.addWidget(self.recommended_switch)
-        self._rows.append(self.recommended_card)
-
         self.daemon_cards = []
         self.daemon_switches = []
-        self._daemon_labels = []
+        self._daemon_labels = [master_detail]
+        self._info_buttons = []
         self._forced_notes = []
         self._confirming = False
         self._hotload_acked = False
@@ -240,51 +264,60 @@ class IOSDaemonsContent(QWidget):
             self._forced_daemons = HotLoad(settings).disabled_daemons(
                 device_version=dm.get_current_device_version(),
                 device_model=dm.get_current_device_model())
-        self._services_header = IOSSectionHeader(QCoreApplication.translate(
-            "Nugget", "System & App Services"))
-        self._rows.append(self._services_header)
+        from src.gui.ios.incremental_builder import IncrementalBuilder
+        self._building = True
+        self._rows.hide()
+        self._rows._layout.setEnabled(False)
+        self._rows.setEnabled(False)
+        self._loading_label = QLabel(self.tr("Loading controls…"), self)
+        self._loading_label.hide()
+        layout.addWidget(self._loading_label)
+        self._category_lines = []
+        self._category_groups = []
+        self.master_switch.setEnabled(False)
+        self._builder = IncrementalBuilder(self)
+        self._builder.start(self._build_rows(layout, c))
+
+    def _build_rows(self, layout, c):
         for title, daemon in [
-            (QCoreApplication.translate("Nugget", "Disable thermalmonitord"), Daemon.thermalmonitord),
-            (QCoreApplication.translate("Nugget", "Disable OTA"), Daemon.OTA),
-            (QCoreApplication.translate("Nugget", "Disable UsageTrackingAgent"), Daemon.UsageTrackingAgent),
-            (QCoreApplication.translate("Nugget", "Disable Game Center"), Daemon.GameCenter),
-            (QCoreApplication.translate("Nugget", "Disable ATWAKEUP"), Daemon.ATWAKEUP),
-            (QCoreApplication.translate("Nugget", "Disable Tips Services"), Daemon.Tips),
-            (QCoreApplication.translate("Nugget", "VPN Icon"), Daemon.VPN),
-            (QCoreApplication.translate("Nugget", "Disable Chinese WLAN Service"), Daemon.ChineseLAN),
-            (QCoreApplication.translate("Nugget", "Disable HealthKit"), Daemon.HealthKit),
-            (QCoreApplication.translate("Nugget", "Disable AirPrint"), Daemon.AirPrint),
-            (QCoreApplication.translate("Nugget", "Disable Assistive Touch"), Daemon.AssistiveTouch),
-            (QCoreApplication.translate("Nugget", "Disable iCloud"), Daemon.iCloud),
-            (QCoreApplication.translate("Nugget", "Disable Internet Tethering (Hotspot)"), Daemon.InternetTethering),
-            (QCoreApplication.translate("Nugget", "Disable Passbook"), Daemon.PassBook),
-            (QCoreApplication.translate("Nugget", "Disable Spotlight"), Daemon.Spotlight),
-            (QCoreApplication.translate("Nugget", "Disable Voice Control"), Daemon.VoiceControl),
-            (QCoreApplication.translate("Nugget", "Disable NanoTimeKit (Apple Watch Face Sync)"), Daemon.NanoTimeKit),
-            (QCoreApplication.translate("Nugget", "Disable Apple Ads"), Daemon.AppleAds),
-            (QCoreApplication.translate("Nugget", "Disable News"), Daemon.News),
-            (QCoreApplication.translate("Nugget", "Disable Family Sharing"), Daemon.FamilySharing),
-            (QCoreApplication.translate("Nugget", "Disable Video Subscriptions"), Daemon.VideoSubscriptions),
-            (QCoreApplication.translate("Nugget", "Disable Web Bookmarks"), Daemon.WebBookmarks),
-            (QCoreApplication.translate("Nugget", "Disable Apple Watch (Nano) Services"), Daemon.AppleWatchNano),
-            (QCoreApplication.translate("Nugget", "Disable Siri Backend Services"), Daemon.SiriServices),
-            (QCoreApplication.translate("Nugget", "Disable Wi-Fi Logging"), Daemon.WifiLogging),
-            (QCoreApplication.translate("Nugget", "Disable Maps (Geod)"), Daemon.Maps),
-            (QCoreApplication.translate("Nugget", "Disable Safari Suggestions (Parse)"), Daemon.SafariSuggestions),
-            (QCoreApplication.translate("Nugget", "Disable Reminders"), Daemon.Reminders),
-            (QCoreApplication.translate("Nugget", "Disable AirPlay"), Daemon.AirPlay),
-            (QCoreApplication.translate("Nugget", "Disable GameKit Service"), Daemon.GameKitService),
-            (QCoreApplication.translate("Nugget", "Disable Sidecar"), Daemon.Sidecar),
-            (QCoreApplication.translate("Nugget", "Disable Speech Recognition"), Daemon.SpeechRecognition),
-            (QCoreApplication.translate("Nugget", "Disable Translate"), Daemon.Translate),
-            (QCoreApplication.translate("Nugget", "Disable Mock Location"), Daemon.MockLocation),
-            (QCoreApplication.translate("Nugget", "Disable DeviceCheck"), Daemon.DeviceCheck),
-            (QCoreApplication.translate("Nugget", "Follow Up"), Daemon.FollowUp),
-            (QCoreApplication.translate("Nugget", "Location Services"), Daemon.Location),
+            (QCoreApplication.translate("Nugget", 'Disable OTA Update Services'), Daemon.OTA),
+            (QCoreApplication.translate("Nugget", 'Disable App Usage Reports'), Daemon.UsageTrackingAgent),
+            (QCoreApplication.translate("Nugget", 'Disable Game Center'), Daemon.GameCenter),
+            (QCoreApplication.translate("Nugget", 'Disable Tips Suggestions'), Daemon.Tips),
+            (QCoreApplication.translate("Nugget", 'Disable IPsec VPN Connections'), Daemon.VPN),
+            (QCoreApplication.translate("Nugget", 'Disable WAPI Wi-Fi Connections'), Daemon.ChineseLAN),
+            (QCoreApplication.translate("Nugget", 'Disable Health Data Service'), Daemon.HealthKit),
+            (QCoreApplication.translate("Nugget", 'Disable AirPrint'), Daemon.AirPrint),
+            (QCoreApplication.translate("Nugget", 'Disable AssistiveTouch'), Daemon.AssistiveTouch),
+            (QCoreApplication.translate("Nugget", 'Disable Cloud Media Service'), Daemon.iCloud),
+            (QCoreApplication.translate("Nugget", 'Disable Personal Hotspot'), Daemon.InternetTethering),
+            (QCoreApplication.translate("Nugget", 'Disable Wallet Pass Service'), Daemon.PassBook),
+            (QCoreApplication.translate("Nugget", 'Disable System Search Updates'), Daemon.Spotlight),
+            (QCoreApplication.translate("Nugget", 'Disable Siri and Voice Helpers'), Daemon.VoiceControl),
+            (QCoreApplication.translate("Nugget", 'Disable Apple Ad Services'), Daemon.AppleAds),
+            (QCoreApplication.translate("Nugget", 'Disable Apple News Updates'), Daemon.News),
+            (QCoreApplication.translate("Nugget", 'Disable Family Sharing Updates'), Daemon.FamilySharing),
+            (QCoreApplication.translate("Nugget", 'Disable TV Provider Sign-In Helper'), Daemon.VideoSubscriptions),
+            (QCoreApplication.translate("Nugget", 'Disable Safari Bookmark Service'), Daemon.WebBookmarks),
+            (QCoreApplication.translate("Nugget", 'Disable Wi-Fi Problem Logs'), Daemon.WifiLogging),
+            (QCoreApplication.translate("Nugget", 'Disable Maps Background Service'), Daemon.Maps),
+            (QCoreApplication.translate("Nugget", 'Disable Online Search Suggestions'), Daemon.SafariSuggestions),
+            (QCoreApplication.translate("Nugget", 'Disable Reminders Background Service'), Daemon.Reminders),
+            (QCoreApplication.translate("Nugget", 'Disable AirPlay Service'), Daemon.AirPlay),
+            (QCoreApplication.translate("Nugget", 'Disable Game Services Helper'), Daemon.GameKitService),
+            (QCoreApplication.translate("Nugget", 'Disable Companion Display Helper'), Daemon.Sidecar),
+            (QCoreApplication.translate("Nugget", 'Disable Speech-to-Text Helper'), Daemon.SpeechRecognition),
+            (QCoreApplication.translate("Nugget", 'Disable Test Locations'), Daemon.MockLocation),
+            (QCoreApplication.translate("Nugget", 'Disable Feedback Background Tasks'), Daemon.Feedback),
+            (QCoreApplication.translate("Nugget", 'Disable Settings Usage Reports'), Daemon.SettingsStats),
+            (QCoreApplication.translate("Nugget", 'Disable Music Recognition'), Daemon.Shazam),
+            (QCoreApplication.translate("Nugget", 'Disable Account Reminder Notices'), Daemon.FollowUp),
+            (QCoreApplication.translate("Nugget", 'Disable Location Services'), Daemon.Location),
         ]:
             card, switch = self._make_daemon_switch(title, daemon)
             self.daemon_cards.append(card)
             self.daemon_switches.append((daemon, switch))
+            yield
 
         self._screen_time_card = None
         self.screen_time_tweak = tweaks.get(TweakID.ClearScreenTimeAgentPlist)
@@ -294,95 +327,244 @@ class IOSDaemonsContent(QWidget):
             card.setProperty("searchText", "Screen Time ScreenTimeAgent clear plist")
             row_layout = QHBoxLayout(card)
             row_layout.setContentsMargins(16, 12, 16, 12)
-            row_layout.setSpacing(12)
+            row_layout.setSpacing(_ROW_SPACING)
             label = QLabel(QCoreApplication.translate(
-                "Nugget", "Clear ScreenTimeAgent.plist file"))
+                "Nugget", "Clear Saved Screen Time Settings"))
             label.setWordWrap(True)
-            label.setStyleSheet(f"color: {c.text_primary}; font-size: 15px; background-color: transparent;")
+            label.setStyleSheet(f"color: {c.text_primary}; font-size: 15px;")
             self._screen_time_label = label
-            row_layout.addWidget(label, 1)
+            text = QVBoxLayout()
+            text.setSpacing(4)
+            text.addWidget(label)
+            detail = QLabel(self.tr("Clears one saved Screen Time settings file. Does not reliably remove app or website restrictions."))
+            detail.setWordWrap(True)
+            detail.setProperty("daemonInformation", True)
+            detail.setStyleSheet(f"color: {c.text_secondary}; font-size: 13px;")
+            self._daemon_labels.append(detail)
+            text.addWidget(detail)
+            row_layout.addLayout(text, 1)
             self.screen_time_switch = IOSSwitch(self.screen_time_tweak.enabled)
             self.screen_time_switch.toggled.connect(self._on_screen_time_toggled)
             row_layout.addWidget(self.screen_time_switch)
+            _reserve_action_space(row_layout)
             self._screen_time_group = card
             self._rows.append(card)
 
         self._service_cards = list(self.daemon_cards)
 
         # Analytics, data tracking & logging toggles (from MiniVoidyy/GoldenNugget-)
-        # Safe telemetry/analytics daemons — nothing boot-critical.
-        self._analytics_header = IOSSectionHeader(
-            QCoreApplication.translate("Nugget", "Analytics & Diagnostics")
-        )
-        self._rows.append(self._analytics_header)
         analytics_start = len(self.daemon_cards)
         for title, daemon in [
-            (QCoreApplication.translate("Nugget", "Disable Crash Reporting"), Daemon.CrashReports),
-            (QCoreApplication.translate("Nugget", "Disable Wi-Fi Analytics"), Daemon.WifiAnalytics),
-            (QCoreApplication.translate("Nugget", "Disable System Analytics"), Daemon.AnalyticsHelper),
-            (QCoreApplication.translate("Nugget", "Disable Audio Analytics"), Daemon.AudioAnalytics),
-            (QCoreApplication.translate("Nugget", "Disable Ecosystem Analytics"), Daemon.EcosystemAnalytics),
-            (QCoreApplication.translate("Nugget", "Disable Call Analytics (RTC Reporting)"), Daemon.CallAnalytics),
-            (QCoreApplication.translate("Nugget", "Disable CoreDuet (Battery/Usage Statistics)"), Daemon.CoreDuet),
-            (QCoreApplication.translate("Nugget", "Disable Insight"), Daemon.Insight),
-            (QCoreApplication.translate("Nugget", "Disable Metrics"), Daemon.Metrics),
-            (QCoreApplication.translate("Nugget", "Disable Media Experience Analytics"), Daemon.MediaExperience),
-            (QCoreApplication.translate("Nugget", "Disable Symptom Diagnostics"), Daemon.Symptomsd),
-            (QCoreApplication.translate("Nugget", "Disable Statistical Diagnostics"), Daemon.StatisticalDiagnostic),
-            (QCoreApplication.translate("Nugget", "Disable Wireless Diagnostics"), Daemon.WirelessDiagnostics),
-            (QCoreApplication.translate("Nugget", "Disable Duet Heuristic"), Daemon.DuetHeuristic),
-            (QCoreApplication.translate("Nugget", "Disable Duet Expert"), Daemon.DuetExpert),
-            (QCoreApplication.translate("Nugget", "Disable Decisiond"), Daemon.Decisiond),
-            (QCoreApplication.translate("Nugget", "Disable Triald (A/B Experiment Telemetry)"), Daemon.Triald),
-            (QCoreApplication.translate("Nugget", "Disable Sociald"), Daemon.Sociald),
+            (QCoreApplication.translate("Nugget", 'Disable System Problem Reports'), Daemon.Diagnostics),
+            (QCoreApplication.translate("Nugget", 'Disable Crash Reports and System Logs'), Daemon.CrashReports),
+            (QCoreApplication.translate("Nugget", 'Disable Wi-Fi Usage Reports'), Daemon.WifiAnalytics),
+            (QCoreApplication.translate("Nugget", 'Disable System Usage Reports'), Daemon.AnalyticsHelper),
+            (QCoreApplication.translate("Nugget", 'Disable Audio Problem Reports'), Daemon.AudioAnalytics),
+            (QCoreApplication.translate("Nugget", 'Disable Cross-Device Usage Reports'), Daemon.EcosystemAnalytics),
+            (QCoreApplication.translate("Nugget", 'Disable Call Quality Reports'), Daemon.CallAnalytics),
+            (QCoreApplication.translate("Nugget", 'Disable Activity-Based Suggestions'), Daemon.CoreDuet),
+            (QCoreApplication.translate("Nugget", 'Disable Insight Helper'), Daemon.Insight),
+            (QCoreApplication.translate("Nugget", 'Disable System Measurement Reports'), Daemon.Metrics),
+            (QCoreApplication.translate("Nugget", 'Disable Playback Control Service'), Daemon.MediaExperience),
+            (QCoreApplication.translate("Nugget", 'Disable Network Health Reports'), Daemon.Symptomsd),
+            (QCoreApplication.translate("Nugget", 'Disable Statistical Problem Reports'), Daemon.StatisticalDiagnostic),
+            (QCoreApplication.translate("Nugget", 'Disable Wireless Troubleshooting'), Daemon.WirelessDiagnostics),
+            (QCoreApplication.translate("Nugget", 'Disable Background Scheduling Helper'), Daemon.DuetHeuristic),
+            (QCoreApplication.translate("Nugget", 'Disable Activity Prediction Helper'), Daemon.DuetExpert),
+            (QCoreApplication.translate("Nugget", 'Disable Apple Feature Trials'), Daemon.Triald),
+            (QCoreApplication.translate("Nugget", 'Disable Social Account Helper'), Daemon.Sociald),
         ]:
             card, switch = self._make_daemon_switch(title, daemon)
             self.daemon_cards.append(card)
             self.daemon_switches.append((daemon, switch))
+            yield
 
         self._analytics_cards = self.daemon_cards[analytics_start:]
+        self._experimental_cards = []
+        self._experimental_switches = []
+        self._risky_cards = []
+        for title, daemon, information in (
+            ('Disable Temperature Monitoring', Daemon.thermalmonitord, 'Disrupts temperature monitoring; can cause instability.'),
+            ('Disable ATWAKEUP Helper', Daemon.ATWAKEUP, 'Reported to cause repeated interface restarts with AirPods when disabled.'),
+        ):
+            card, switch = self._make_daemon_switch(self.tr(title), daemon, self.tr(information))
+            self.daemon_cards.append(card)
+            self.daemon_switches.append((daemon, switch))
+            self._risky_cards.append(card)
+            yield
+        self._organize_rows()
         self.search_empty = IOSSearchEmpty(self)
         layout.addWidget(self.search_empty)
-        self.search.textChanged.connect(self._apply_search)
-        self._update_daemons_enabled()
+        from src.gui.ios.visibility_batch import VisibilityBatch
+        self._visibility_batch = VisibilityBatch(self)
+        self.search.textChanged.connect(self._visibility_batch.cancel)
+        self.search.connect_filter(self._apply_search)
+        self._rows._layout.setEnabled(True)
+        self._building = False
+        self._loading_label.hide()
+        self.master_switch.setEnabled(True)
         layout.addStretch()
+        self.refresh_from_tweaks()
+        self._viewport_rows.request()
+        page = getattr(self.window, "ios_daemons", None)
+        if page is not None:
+            page._applied_theme_revision = ColorThemeManager.instance().revision
 
-    def _apply_search(self):
+    def _organize_rows(self):
+        from src.gui.ios.daemon_categories import CATEGORY_ORDER, DAEMON_CATEGORIES, REPORTS_CATEGORY, ACCOUNTS_CATEGORY
+        grouped = {title: [] for title in CATEGORY_ORDER}
+        for card, (daemon, switch) in zip(self.daemon_cards, self.daemon_switches):
+            if any(key in self.daemons_tweak.never_enable for key in daemon.value):
+                card.hide()
+                continue
+            category = "Risky tweaks" if card in self._risky_cards else REPORTS_CATEGORY if daemon in ANALYTICS_DAEMONS else DAEMON_CATEGORIES.get(daemon.name, "System Services")
+            card.setProperty("searchText", f'{self.tr(category)} {card.property("searchText")}')
+            grouped[category].append(card)
+        if self._screen_time_card is not None:
+            self._screen_time_card.setProperty("sortTitle", "clear screentime")
+            grouped[ACCOUNTS_CATEGORY].append(self._screen_time_card)
+        while self._rows._layout.count():
+            self._rows._layout.takeAt(0)
+        self._rows._rows = []
+        self._category_groups = []
+        self._category_lines = []
+        self._analytics_rows = grouped[REPORTS_CATEGORY]
+        for title in CATEGORY_ORDER:
+            cards = grouped[title]
+            if not cards:
+                continue
+            group = QWidget(self._rows)
+            group_layout = QVBoxLayout(group)
+            group_layout.setContentsMargins(0, 16, 0, 0)
+            group_layout.setSpacing(10)
+            heading = IOSSectionHeader(self.tr(title))
+            heading.setToolTip(self.tr("{0} controls").format(len(cards)))
+            group_layout.addWidget(heading)
+            separator = QFrame(group)
+            separator.setFixedHeight(1)
+            self._category_lines.append(separator)
+            group_layout.addWidget(separator)
+            from src.gui.liquid.cards import ControlGrid, prepare_card
+            grid = ControlGrid()
+            group_layout.addLayout(grid)
+            if title == REPORTS_CATEGORY:
+                self._analytics_group = group
+                master = IOSCard()
+                row = QHBoxLayout(master)
+                row.setContentsMargins(16, 12, 16, 12)
+                row.setSpacing(_ROW_SPACING)
+                text = QVBoxLayout()
+                label = QLabel(self.tr("Disable All Analytics"))
+                self._daemon_labels.append(label)
+                self._analytics_count_label = QLabel()
+                self._analytics_count_label.setProperty("daemonInformation", True)
+                self._daemon_labels.append(self._analytics_count_label)
+                text.addWidget(label)
+                text.addWidget(self._analytics_count_label)
+                row.addLayout(text, 1)
+                self.analytics_switch = IOSSwitch(False)
+                self.analytics_switch.toggled.connect(self._toggle_all_analytics)
+                row.addWidget(self.analytics_switch)
+                _reserve_action_space(row)
+                prepare_card(master)
+                grid.addWidget(master)
+            for card in sorted(cards, key=lambda row: str(row.property("sortTitle")).casefold()):
+                grid.addWidget(card)
+                card.show()
+            self._rows.append(group)
+            self._category_groups.append((group, cards))
+        self._sync_analytics_switch()
+        self._retheme()
+
+    def _sync_analytics_switch(self):
+        values = self.daemons_tweak.value or {}
+        count = sum(all(values.get(key) is True for key in daemon.value) for daemon in ANALYTICS_DAEMONS)
+        self.analytics_switch.blockSignals(True)
+        self.analytics_switch.setChecked(count == len(ANALYTICS_DAEMONS))
+        self.analytics_switch.blockSignals(False)
+        self._analytics_count_label.setText(self.tr("{0} of {1} controls selected. Turn on to disable all; turn off to re-enable all after Apply.").format(count, len(ANALYTICS_DAEMONS)))
+        self._analytics_count_label.setWordWrap(True)
+
+    def _toggle_all_analytics(self, checked):
+        if not self.daemons_tweak.enabled or (checked and not self._confirm_daemon_enable()):
+            self._sync_analytics_switch()
+            return
+        for daemon in ANALYTICS_DAEMONS:
+            if not checked and daemon.name in self._forced_daemons:
+                continue
+            self.daemons_tweak.set_multiple_values(daemon.value, value=checked)
+            self._set_switch(daemon, checked)
+        self._sync_analytics_switch()
+        self._apply_search()
+
+    def _apply_search(self, *_args):
+        if getattr(self, "_building", False):
+            return
+        self._filter_rows()
+
+    def _filter_rows(self):
         searching = bool(self.search.text().strip())
+        mode = self.filter_control.currentData()
+        favorites = self._favorites.names()
         matches = 0
-        for card in self.daemon_cards:
-            visible = self.search.matches(card.property("searchText"))
-            card.setVisible(visible)
+        operations = []
+        visibility = {}
+        for card, (daemon, switch) in zip(self.daemon_cards, self.daemon_switches):
+            visible = (not any(key in self.daemons_tweak.never_enable for key in daemon.value)
+                       and self.search.matches(card.property("searchText")))
+            if mode == "enabled":
+                visible = visible and switch.isChecked()
+            elif mode == "disabled":
+                visible = visible and not switch.isChecked()
+            elif mode == "favorites":
+                visible = visible and "daemon:" + daemon.name in favorites
+            operations.append((card, visible))
+            visibility[card] = visible
             matches += visible
         if self._screen_time_card is not None:
-            screen_match = self.search.matches(
-                self._screen_time_card.property("searchText"))
-            self._screen_time_group.setVisible(screen_match)
-            matches += screen_match
-        self._services_header.setVisible(
-            any(not card.isHidden() for card in self._service_cards) or
-            (self._screen_time_card is not None and not self._screen_time_card.isHidden()))
-        self.recommended_card.setVisible(not searching)
-        self._analytics_header.setVisible(any(not card.isHidden() for card in self._analytics_cards))
+            visible = mode == "all" and self.search.matches(self._screen_time_card.property("searchText"))
+            operations.append((self._screen_time_card, visible))
+            visibility[self._screen_time_card] = visible
+            matches += visible
+        for group, cards in self._category_groups:
+            operations.append((group, any(visibility.get(card, False) for card in cards)))
         disabled_matches = matches and not self.daemons_tweak.enabled
         self.search_empty.setText(QCoreApplication.translate(
             "ListSearch", "Enable daemon modifications to see matching services.")
             if disabled_matches else QCoreApplication.translate("ListSearch", "No matches found."))
-        self.search_empty.setVisible(searching and (not matches or disabled_matches))
+        operations.append((self.search_empty, bool((searching or mode != "all") and (not matches or disabled_matches))))
+        self._visibility_batch.apply(self._rows, operations)
 
-    def _make_daemon_switch(self, title: str, daemon: Daemon):
+    def _make_daemon_switch(self, title: str, daemon: Daemon, information: str = ""):
+        from src.gui.ios.feature_news import control_title
+        title = control_title(title)
+        information = information or self.tr(DAEMON_DESCRIPTIONS.get(daemon.name, ""))
         card = IOSCard()
-        card.setProperty("searchText", " ".join([title, daemon.name, *daemon.value]))
+        card.setProperty("searchText", " ".join([title, information, daemon.name, *daemon.value]))
+        card.setProperty("sortTitle", title.removeprefix(self.tr("Disable ")).casefold())
         row_layout = QHBoxLayout(card)
         row_layout.setContentsMargins(16, 12, 16, 12)
-        row_layout.setSpacing(12)
+        row_layout.setSpacing(_ROW_SPACING)
 
         c = ColorThemeManager.instance().colors
         label = QLabel(title)
         label.setWordWrap(True)
-        label.setStyleSheet(f"color: {c.text_primary}; font-size: 15px; background-color: transparent;")
+        label.setStyleSheet(f"color: {c.text_primary}; font-size: 15px;")
         self._daemon_labels.append(label)
-        row_layout.addWidget(label, 1)
+        if information:
+            text = QVBoxLayout()
+            text.setSpacing(5)
+            text.addWidget(label)
+            detail = QLabel(information)
+            detail.setWordWrap(True)
+            detail.setStyleSheet(f"color: {c.text_secondary}; font-size: 13px;")
+            detail.setProperty("daemonInformation", True)
+            self._daemon_labels.append(detail)
+            text.addWidget(detail)
+            row_layout.addLayout(text, 1)
+            card.setToolTip(information + "\n\n" + "\n".join(daemon.value))
+        else:
+            row_layout.addWidget(label, 1)
 
         value = self.daemons_tweak.value.get(daemon.value[0], False) if self.daemons_tweak.value else False
         dangerous = any(key in self.daemons_tweak.never_enable for key in daemon.value)
@@ -392,7 +574,34 @@ class IOSDaemonsContent(QWidget):
         switch.toggled.connect(
             lambda checked, d=daemon: self._on_daemon_toggled(d, checked)
         )
+        from src.gui.ios.feature_news import add_new_badge
+        add_new_badge(row_layout, "daemon:" + daemon.name, card)
         row_layout.addWidget(switch)
+        from src.gui.liquid.controls import FavoriteButton
+        favorite = FavoriteButton(self)
+        favorite.setFixedSize(_FAVORITE_SIZE, _FAVORITE_SIZE)
+        favorite.setCheckable(True)
+        favorite.setIconSize(QSize(23, 23))
+        favorite.setCursor(Qt.PointingHandCursor)
+        favorite.setAccessibleName(self.tr("Favorite: {0}").format(title))
+        favorite.setToolTip(self.tr("Add or remove from favorites"))
+        favorite.setStyleSheet(t("tweak_favorite_button"))
+        self._favorite_buttons["daemon:" + daemon.name] = favorite
+        self._update_favorite(favorite, "daemon:" + daemon.name in self._favorites.names())
+        favorite.toggled.connect(lambda checked, name="daemon:" + daemon.name:
+                                 self._favorites.set_favorite(name, checked))
+        row_layout.addWidget(favorite)
+        info = QPushButton(card)
+        info.setFixedSize(_INFO_SIZE, _INFO_SIZE)
+        info.setIcon(theme_icon(":/icon/questionmark.circle.svg", c.text_secondary))
+        info.setIconSize(QSize(19, 19))
+        info.setCursor(Qt.PointingHandCursor)
+        info.setToolTip(self.tr("About {0}").format(title))
+        info.setAccessibleName(info.toolTip())
+        info.setStyleSheet(t("tweak_info_button"))
+        info.clicked.connect(lambda: self._show_daemon_info(title, information, daemon))
+        self._info_buttons.append(info)
+        row_layout.addWidget(info)
 
         if dangerous:
             switch.setEnabled(False)
@@ -400,9 +609,9 @@ class IOSDaemonsContent(QWidget):
                 "Nugget", "blocked (boot-loop protection)"))
             note.setFixedWidth(100)
             note.setWordWrap(True)
-            note.setStyleSheet(f"color: {c.error}; font-size: 12px; background-color: transparent;")
+            note.setStyleSheet(f"color: {c.error}; font-size: 12px;")
             self._forced_notes.append(note)
-            row_layout.addWidget(note)
+            row_layout.insertWidget(row_layout.indexOf(switch), note)
 
         forced_name = getattr(daemon, "name", "")
         if forced_name in self._forced_daemons:
@@ -413,12 +622,49 @@ class IOSDaemonsContent(QWidget):
             note = QLabel(QCoreApplication.translate("Nugget", "safety rules"))
             note.setFixedWidth(100)
             note.setWordWrap(True)
-            note.setStyleSheet(f"color: {c.error}; font-size: 12px; background-color: transparent;")
+            note.setStyleSheet(f"color: {c.error}; font-size: 12px;")
             self._forced_notes.append(note)
-            row_layout.addWidget(note)
+            row_layout.insertWidget(row_layout.indexOf(switch), note)
 
-        self._rows.append(card)
-        return card, switch
+        from src.gui.liquid.selection_card import bind_selection_card
+        bind_selection_card(card,switch, favorite_feedback=True)
+        row = self._viewport_rows.wrap(card)
+        row.setParent(self._rows)
+        row.hide()
+        return row, switch
+
+    def _show_daemon_info(self, title, information, daemon):
+        from src.gui.dialogs.confirmation import ConfirmationDialog
+        message = self.tr("Intended effect") + "\n" + information
+        message += "\n\n" + self.tr(
+            "The exact effects depend on your system version. Some older service names may be ignored. "
+            "A service name alone does not confirm that stopping it is safe.")
+        message += "\n\n" + self.tr(
+            "Turn the service switch off and apply again to allow it to run. "
+            "The master switch only controls whether changes are included.")
+        dialog = ConfirmationDialog(self, title, message, self.tr("Close"),
+                                    subject="\n".join(daemon.value))
+        dialog.cancel_btn.hide()
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
+
+    def _update_favorite(self, button, selected):
+        button.blockSignals(True)
+        button.setChecked(selected)
+        colors = ColorThemeManager.instance().colors
+        button.setIcon(QIcon(theme_pixmap(
+            ":/icon/star-fill.svg" if selected else ":/icon/star.svg",
+            '#d6b967' if selected else colors.text_secondary, 23,
+            self.devicePixelRatioF())))
+        button.blockSignals(False)
+
+    def _refresh_favorites(self):
+        names = self._favorites.names()
+        for name, button in self._favorite_buttons.items():
+            self._update_favorite(button, name in names)
+        self._apply_search()
 
     def _on_master_toggled(self, checked: bool):
         if checked and not self._confirm_daemon_enable():
@@ -433,13 +679,6 @@ class IOSDaemonsContent(QWidget):
         if pages is not None:
             QTimer.singleShot(0, lambda: self.window._update_shared_nav(
                 pages.currentIndex()))
-
-    def _recommended_all_on(self) -> bool:
-        """True when every daemon in RECOMMENDED_ANALYTICS is already active."""
-        value = self.daemons_tweak.value
-        if not value:
-            return False
-        return all(value.get(d.value[0], False) for d in RECOMMENDED_ANALYTICS)
 
     def _restore_notification_services(self):
         if not self.daemons_tweak.enabled:
@@ -459,27 +698,6 @@ class IOSDaemonsContent(QWidget):
             QCoreApplication.translate(
                 "Nugget", "Service settings are ready. Apply changes and reboot your device "
                 "to re-enable them. Services locked by safety rules remain disabled."))
-
-    def _on_recommended_toggled(self, checked: bool):
-        """Toggle every safe analytics/telemetry daemon at once."""
-        if not self.daemons_tweak.enabled:
-            self.recommended_switch.blockSignals(True)
-            self.recommended_switch.setChecked(self._recommended_all_on())
-            self.recommended_switch.blockSignals(False)
-            return
-        if checked:
-            if not self._confirm_daemon_enable():
-                self.recommended_switch.blockSignals(True)
-                self.recommended_switch.setChecked(False)
-                self.recommended_switch.blockSignals(False)
-                return
-            self.master_switch.setChecked(True)
-        for daemon in RECOMMENDED_ANALYTICS:
-            if getattr(daemon, "name", "") in self._forced_daemons:
-                # HotLoad safety rules force this daemon on — never untoggle it.
-                continue
-            self.daemons_tweak.set_multiple_values(daemon.value, value=checked)
-            self._set_switch(daemon, checked)
 
     def _on_daemon_toggled(self, daemon: Daemon, checked: bool):
         if not self.daemons_tweak.enabled:
@@ -503,6 +721,8 @@ class IOSDaemonsContent(QWidget):
             self._set_switch(daemon, False)
             return
         self.daemons_tweak.set_multiple_values(daemon.value, value=checked)
+        self._sync_analytics_switch()
+        self._apply_search()
         if checked:
             self.master_switch.setChecked(True)
             if daemon is Daemon.Location:
@@ -553,12 +773,12 @@ class IOSDaemonsContent(QWidget):
         self._confirming = True
         try:
             if not self._show_confirm_dialog(
-                "Hold Up before pressing continue, this section can bootloop "
-                "your phone. Don't cry about that you have not been notified then."
+                "Stopping system services can leave your device stuck restarting or unable to start. "
+                "Recovery may require restoring the device."
             ):
                 return False
             if not self._show_confirm_dialog(
-                "Creating full backup is hightly recommended"
+                "Make a full device backup before applying these changes."
             ):
                 return False
             if settings is not None:
@@ -572,12 +792,12 @@ class IOSDaemonsContent(QWidget):
         import PySide6.QtWidgets as QW
         box = QW.QMessageBox(self)
         box.setIcon(QW.QMessageBox.Icon.Warning)
-        box.setWindowTitle(QCoreApplication.translate("Nugget", "Hold Up"))
+        box.setWindowTitle(QCoreApplication.translate("Nugget", "Before you continue"))
         box.setText(text)
         continue_btn = box.addButton(
             QCoreApplication.translate("Nugget", "Continue Anyway"),
             QW.QMessageBox.ButtonRole.AcceptRole)
-        stop_btn = box.addButton(
+        box.addButton(
             QCoreApplication.translate("Nugget", "Stop"),
             QW.QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(continue_btn)
@@ -604,10 +824,6 @@ class IOSDaemonsContent(QWidget):
     def _update_daemons_enabled(self, animate: bool = False):
         enabled = self.daemons_tweak.enabled
         self._rows.setEnabled(enabled)
-        for card in self.daemon_cards:
-            card.setEnabled(enabled)
-        if hasattr(self, 'recommended_card'):
-            self.recommended_card.setEnabled(enabled)
         if self._screen_time_card is not None:
             self._screen_time_group.setEnabled(enabled)
         for switch in self._forced_switches:
@@ -625,6 +841,15 @@ class IOSDaemonsContent(QWidget):
 
     def refresh_from_tweaks(self):
         """Resync every switch with the current tweak state."""
+        if getattr(self, "_building", False):
+            return
+        signature = (self.daemons_tweak.enabled,
+                     tuple(sorted((self.daemons_tweak.value or {}).items())),
+                     getattr(getattr(self, 'screen_time_tweak', None), 'enabled', False))
+        if (signature == getattr(self, '_refresh_signature', None)
+                and self.master_switch.isChecked() == self.daemons_tweak.enabled):
+            return
+        self._refresh_signature = signature
         self.master_switch.blockSignals(True)
         self.master_switch.setChecked(self.daemons_tweak.enabled)
         self.master_switch.blockSignals(False)
@@ -632,9 +857,10 @@ class IOSDaemonsContent(QWidget):
 
         for daemon, switch in self.daemon_switches:
             value = self.daemons_tweak.value.get(daemon.value[0], False) if self.daemons_tweak.value else False
-            switch.blockSignals(True)
-            switch.setChecked(value)
-            switch.blockSignals(False)
+            if switch.isChecked() != value:
+                switch.blockSignals(True)
+                switch.setChecked(value)
+                switch.blockSignals(False)
 
         if hasattr(self, "screen_time_switch"):
             self.screen_time_switch.blockSignals(True)
@@ -647,11 +873,8 @@ class IOSDaemonsContent(QWidget):
             switch.setEnabled(False)
             switch.blockSignals(False)
 
-        recommended_switch = getattr(self, 'recommended_switch', None)
-        if recommended_switch is not None:
-            recommended_switch.blockSignals(True)
-            recommended_switch.setChecked(self._recommended_all_on())
-            recommended_switch.blockSignals(False)
+        self._sync_analytics_switch()
+        self._apply_search()
 
     def _retheme(self):
         c = ColorThemeManager.instance().colors
@@ -659,15 +882,19 @@ class IOSDaemonsContent(QWidget):
         self._disabled_hint.setStyleSheet(
             f"color: {c.text_secondary}; font-size: 13px; background-color: transparent;")
         for lbl in self._daemon_labels:
-            lbl.setStyleSheet(f"color: {c.text_primary}; font-size: 15px; background-color: transparent;")
+            lbl.setStyleSheet(f"color: {c.text_secondary}; font-size: 13px;" if lbl.property("daemonInformation") else f"color: {c.text_primary}; font-size: 15px;")
+        for name, button in self._favorite_buttons.items():
+            self._update_favorite(button, name in self._favorites.names())
+        for button in self._info_buttons:
+            button.setStyleSheet(t("tweak_info_button"))
+            button.setIcon(theme_icon(":/icon/questionmark.circle.svg", c.text_secondary))
         for note in self._forced_notes:
-            note.setStyleSheet(f"color: {c.error}; font-size: 12px; background-color: transparent;")
-        if hasattr(self, '_recommended_label'):
-            self._recommended_label.setStyleSheet(
-                f"color: {c.text_primary}; font-size: 15px; font-weight: 600; background-color: transparent;")
+            note.setStyleSheet(f"color: {c.error}; font-size: 12px;")
+        for separator in self._category_lines:
+            separator.setStyleSheet(f"background-color: {c.border}; border: none;")
         if hasattr(self, '_screen_time_label'):
             self._screen_time_label.setStyleSheet(
-                f"color: {c.text_primary}; font-size: 15px; background-color: transparent;")
+                f"color: {c.text_primary}; font-size: 15px;")
 
 
 class IOSDaemonsPage(QWidget):
@@ -685,18 +912,27 @@ class IOSDaemonsPage(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet(f"background-color: {c.bg_primary}; border: none;")
         self._scroll = scroll
-        self.content = IOSDaemonsContent(window, self)
-        scroll.setWidget(self.content)
+        self.content = None
         layout.addWidget(scroll)
 
+    def prepare_content(self, *, finish=True):
+        if self.content is None:
+            self.content = IOSDaemonsContent(self.window, self)
+            self._scroll.setWidget(self.content)
+        if finish:
+            self.content._builder.finish()
+
     def showEvent(self, event):
+        self.prepare_content(finish=False)
         super().showEvent(event)
         self.refresh_from_tweaks()
 
     def refresh_from_tweaks(self):
-        self.content.refresh_from_tweaks()
+        if self.content is not None:
+            self.content.refresh_from_tweaks()
 
     def _retheme(self):
         c = ColorThemeManager.instance().colors
         self._scroll.setStyleSheet(f"background-color: {c.bg_primary}; border: none;")
-        self.content._retheme()
+        if self.content is not None:
+            self.content._retheme()

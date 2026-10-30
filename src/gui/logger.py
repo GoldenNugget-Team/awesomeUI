@@ -1,7 +1,7 @@
 import logging
 import sys
 
-from src.controllers.nugget_logger import init_logging, get_log_path
+from src.controllers.nugget_logger import init_logging
 
 
 class DynamicConsoleHandler(logging.StreamHandler):

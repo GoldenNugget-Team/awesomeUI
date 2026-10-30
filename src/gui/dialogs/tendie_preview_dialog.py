@@ -9,7 +9,7 @@ by the PosterBoard cards, or fetched in the background) is shown instead.
 
 import os
 
-from PySide6.QtCore import Qt, QUrl, QCoreApplication
+from PySide6.QtCore import Qt, QUrl, QCoreApplication, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtGui import QGuiApplication
@@ -31,6 +31,7 @@ class TendiePreviewDialog(QDialog):
         self._reply = None
         self._nam = QNetworkAccessManager(self)
         self._dark = False
+        self._closed = False
 
         self.setWindowTitle(QCoreApplication.translate(
             "Nugget", "Lock Screen Preview"))
@@ -85,7 +86,8 @@ class TendiePreviewDialog(QDialog):
 
         self._retheme()
         ColorThemeManager.instance().theme_changed.connect(self._retheme)
-        self._load()
+        self._tendie_bundle = None
+        QTimer.singleShot(0, self._load)
 
     def _retheme(self):
         self.setStyleSheet(t('confirm_dialog'))
@@ -185,21 +187,35 @@ class TendiePreviewDialog(QDialog):
     def _load(self):
         """Prefer a live CAML scene render, then bitmap extraction, then the
         catalog preview."""
-        self._tendie_bundle = None
-        try:
+        from src.gui.dialogs.file_task import start_file_task
+        tendie_path = self._tendie.path
+
+        def load():
             from src.controllers.ca.tendie import load_tendie
-            self._tendie_bundle = load_tendie(self._tendie.path)
-        except Exception:
-            self._tendie_bundle = None
+            from src.controllers.tendie_preview import extract_tendie_preview
+            bundle = load_tendie(tendie_path)
+            # Avoid extracting the fallback when a valid scene exists.
+            if bundle is not None and any((bundle.floating, bundle.wallpaper, bundle.background)):
+                return bundle, None
+            return bundle, extract_tendie_preview(tendie_path)
+
+        self._load_task = start_file_task(self, load, self._loaded, lambda _: self._loaded((None, None)))
+
+    def _loaded(self, result):
+        if self._closed:
+            return
+        self._tendie_bundle, path = result
+        # Only set up CA if the dialog is still open
         if self._setup_ca():
             return
-
-        path = None
-        try:
+        if self._tendie_bundle is not None and path is None:
+            from src.gui.dialogs.file_task import start_file_task
             from src.controllers.tendie_preview import extract_tendie_preview
-            path = extract_tendie_preview(self._tendie.path)
-        except Exception:
-            path = None
+            tendie_path = self._tendie.path
+            self._load_task = start_file_task(self, lambda: extract_tendie_preview(tendie_path),
+                            lambda fallback: self._loaded((None, fallback)),
+                            lambda _: self._loaded((None, None)))
+            return
         if path and os.path.exists(path):
             self._apply_image(path, local=True)
             return
@@ -283,12 +299,24 @@ class TendiePreviewDialog(QDialog):
     # ---- lifecycle ------------------------------------------------------
 
     def closeEvent(self, event):
+        self._closed = True
+        # Stop any running Core Animation
+        if hasattr(self, '_frame') and self._frame is not None:
+            # Stop the timer to prevent it from firing after close
+            self._frame._stop_ca()
+        task = getattr(self, '_load_task', None)
+        if task is not None:
+            task.cancel()
         if self._reply is not None:
             self._reply.abort()
             self._reply = None
         super().closeEvent(event)
 
     def reject(self):
+        self._closed = True
+        task = getattr(self, '_load_task', None)
+        if task is not None:
+            task.cancel()
         if self._reply is not None:
             self._reply.abort()
             self._reply = None

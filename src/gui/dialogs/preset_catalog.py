@@ -1,4 +1,9 @@
-"""Browse the community preset catalog, and submit a preset to it."""
+"""Browse the community preset catalog, and submit a preset to it.
+
+The catalog window has two lists: presets (share codes) and .batter
+templates. A template is downloaded by id, checked against the size and
+SHA-256 in the index, stored in the app's data folder and added to the
+Templates list; nothing is applied until the user presses Apply."""
 import time
 
 from PySide6.QtCore import QCoreApplication, QSettings, Qt, QUrl
@@ -11,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from src.controllers import preset_catalog, share_code
 from src.gui.dialogs.share_preset import _ThemedDialog
+from src.gui.ios.components import IOSSegmentedFilter
 from src.gui.theme import ColorThemeManager
 
 AUTHOR_KEY = "catalog_author"
@@ -23,6 +29,26 @@ def _tr(text):
 def _error_text(error):
     context = "ShareCode" if isinstance(error, share_code.ShareCodeError) else "PresetCatalog"
     return QCoreApplication.translate(context, str(error))
+
+
+def _size_text(size):
+    if size >= 1048576:
+        return _tr("{0} MB").format(f"{size / 1048576:.1f}")
+    return _tr("{0} KB").format(max(1, round(size / 1024)))
+
+
+def add_template(path, device_version=""):
+    """Add a downloaded template to the Templates list, replacing an older copy."""
+    from src.tweaks.posterboard.template_file import TemplateFile
+    from src.tweaks.tweaks import TweakID, tweaks
+    holder = tweaks[TweakID.Templates]
+    template = TemplateFile(path, device_version=device_version or None)
+    for old in [item for item in holder.templates if getattr(item, "path", None) == path]:
+        holder.templates.remove(old)
+        if hasattr(old, "clean_files"):
+            old.clean_files()
+    holder.templates.append(template)
+    return template
 
 
 def _device_context(window):
@@ -39,20 +65,40 @@ class CatalogDialog(_ThemedDialog):
     """List on the left, the selected preset with its risk on the right."""
 
     def __init__(self, preset_manager, device_version="", device_model="", hotload=None,
-                 parent=None, fetch=True):
-        super().__init__(_tr("Preset Catalog"), parent)
+                 parent=None, fetch=True, embedded=False):
+        super().__init__(_tr("Community Catalog"), parent)
+        # embedded: a plain widget on the Community Catalog page, whose nav bar
+        # already shows the title and which has nothing to close
+        self.embedded = embedded
+        self.on_change = None   # called after an import or an added template
+        if embedded:
+            self.setWindowFlags(Qt.WindowType.Widget)
+            self.setModal(False)
+            self._layout.setContentsMargins(16, 16, 16, 16)
+            heading = self.findChild(QLabel, "confirmTitle")
+            if heading is not None:
+                heading.hide()
         self.pm = preset_manager
         self.device_version = device_version
         self.device_model = device_model
         self.hotload = hotload
         self.entries = []
+        self.templates = []
         self.imported = []
+        self.added_templates = []
+        self.installed = {}     # see preset_catalog.installed_items
+        self.add_template = add_template
+        self._download = None
         self.risk_panel = None
         self._reply = None
         self._saved_at = 0
-        self.setMinimumSize(880, 620)
-        self._muted(_tr("Presets shared by the community and reviewed by the GoldenNugget team. "
-                        "Importing saves a preset; nothing reaches your iPhone until you load it and apply."))
+        if not embedded:
+            self.setMinimumSize(880, 620)
+        self._muted(_tr("Presets and templates shared by the community and reviewed by the GoldenNugget "
+                        "team. Nothing reaches your iPhone until you apply."))
+        self.kind = IOSSegmentedFilter([(_tr("Presets"), "presets"), (_tr("Templates"), "templates")])
+        self.kind.currentIndexChanged.connect(lambda *_: self._fill_list())
+        self._layout.addWidget(self.kind)
 
         filters = QHBoxLayout()
         filters.setSpacing(12)
@@ -92,6 +138,12 @@ class CatalogDialog(_ThemedDialog):
         self.description.setTextFormat(Qt.PlainText)
         self.description.setObjectName("catalogText")
         detail.addWidget(self.description)
+        self.writes = QLabel()
+        self.writes.setWordWrap(True)
+        self.writes.setTextFormat(Qt.PlainText)
+        self.writes.setObjectName("confirmMuted")
+        self.writes.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        detail.addWidget(self.writes)
         self._risk_holder = QVBoxLayout()
         detail.addLayout(self._risk_holder)
         detail.addStretch()
@@ -110,7 +162,8 @@ class CatalogDialog(_ThemedDialog):
         footer = QHBoxLayout()
         footer.addWidget(self._button(_tr("How to Submit…"), self._open_repo))
         footer.addStretch()
-        footer.addWidget(self._button(_tr("Close"), self.accept))
+        if not embedded:
+            footer.addWidget(self._button(_tr("Close"), self.accept))
         self._layout.addLayout(footer)
         self._retheme()
         self._show_selected()
@@ -146,7 +199,7 @@ class CatalogDialog(_ThemedDialog):
         self._reply.downloadProgress.connect(self._on_progress)
         self._reply.finished.connect(self._on_finished)
         self.refresh_button.setEnabled(False)
-        if not self.entries:
+        if not self.entries and not self.templates:
             self.status.setText(_tr("Loading the catalog…"))
             self.status.setVisible(True)
 
@@ -170,7 +223,7 @@ class CatalogDialog(_ThemedDialog):
             preset_catalog.write_cache(data)
 
     def _offline(self, message):
-        if self.entries:
+        if self.entries or self.templates:
             self.status.setText(_tr("Could not reach the catalog, so this is the copy saved on {0}.").format(
                 time.strftime("%Y-%m-%d", time.localtime(self._saved_at))) if self._saved_at else message)
         else:
@@ -180,31 +233,57 @@ class CatalogDialog(_ThemedDialog):
     def load_data(self, data, saved_at=0):
         """Show the presets in index.json ``data``; returns False when it is unusable."""
         try:
-            entries, rejected = preset_catalog.parse_index(data, self.pm._valid_import_structure)
+            entries, templates, rejected = preset_catalog.parse_catalog(data, self.pm._valid_import_structure)
         except preset_catalog.CatalogError as error:
-            if not self.entries:
+            if not self.entries and not self.templates:
                 self._offline(_error_text(error))
             return False
         self.entries = entries
+        self.templates = templates
         self._saved_at = saved_at
-        text = _tr("{0} preset(s) in the catalog.").format(len(entries))
-        if rejected:
-            text += " " + _tr("{0} damaged entry(s) were skipped.").format(rejected)
+        self._rejected = rejected
+        self.refresh_installed()
+        return True
+
+    def refresh_installed(self):
+        """Re-read what is imported or downloaded, for the update marks."""
+        self.installed = preset_catalog.installed_items(self.pm)
+        text = _tr("{0} preset(s) and {1} template(s) in the catalog.").format(len(self.entries), len(self.templates))
+        if getattr(self, "_rejected", 0):
+            text += " " + _tr("{0} damaged entry(s) were skipped.").format(self._rejected)
+        updates = self.update_count()
+        if updates:
+            text += " " + _tr("{0} update(s) available.").format(updates)
         self.status.setText(text)
         self.status.setVisible(True)
         self._fill_list()
-        return True
+
+    def update_count(self):
+        return preset_catalog.count_updates(self.entries + self.templates, self.installed)
+
+    def status_of(self, entry):
+        return preset_catalog.entry_status(entry, self.installed)
+
+    def showing_templates(self):
+        return self.kind.currentData() == "templates"
+
+    def _source(self):
+        return self.templates if self.showing_templates() else self.entries
 
     def visible_entries(self):
         version = self.device_version if self.compatible_only.isChecked() else ""
         query = self.search.text()
-        return [entry for entry in self.entries if entry.supports(version) and entry.matches(query)]
+        return [entry for entry in self._source() if entry.supports(version) and entry.matches(query)]
 
     def _fill_list(self):
         selected = self.selected_entry()
         self.list.clear()
         for entry in self.visible_entries():
-            item = QListWidgetItem(f"{entry.name}\n{entry.author}")
+            mark = {preset_catalog.UPDATE: "  ·  " + _tr("Update available"),
+                    preset_catalog.INSTALLED: "  ·  ✓"}.get(self.status_of(entry)[0], "")
+            if entry.untested:
+                mark += "  ·  ⚠ " + _tr("Not tested on a device")
+            item = QListWidgetItem(f"{entry.name}\n{entry.author}{mark}")
             item.setData(Qt.ItemDataRole.UserRole, entry.id)
             item.setToolTip(", ".join(entry.tags))
             self.list.addItem(item)
@@ -217,7 +296,7 @@ class CatalogDialog(_ThemedDialog):
     def selected_entry(self):
         item = self.list.currentItem() if hasattr(self, "list") else None
         entry_id = item.data(Qt.ItemDataRole.UserRole) if item else None
-        return next((entry for entry in self.entries if entry.id == entry_id), None)
+        return next((entry for entry in self._source() if entry.id == entry_id), None)
 
     def _show_selected(self):
         from src.controllers.risk_assessment import assess
@@ -228,26 +307,58 @@ class CatalogDialog(_ThemedDialog):
             self.risk_panel.hide()
             self.risk_panel.deleteLater()
             self.risk_panel = None
+        templates = self.showing_templates()
+        self.preview_button.setVisible(not templates)
+        state = self.status_of(entry)[0] if entry is not None else None
+        if state == preset_catalog.UPDATE:
+            self.import_button.setText(_tr("Update"))
+        elif state == preset_catalog.INSTALLED:
+            self.import_button.setText(_tr("Download Again") if templates else _tr("Import Again"))
+        else:
+            self.import_button.setText(_tr("Download and Add") if templates else _tr("Import"))
         for button in (self.preview_button, self.import_button):
-            button.setEnabled(entry is not None)
+            button.setEnabled(entry is not None and self._download is None)
+        self.writes.setVisible(templates and entry is not None)
         if entry is None:
-            self.title.setText(_tr("No presets found") if self.entries else "")
+            empty = _tr("No templates found") if templates else _tr("No presets found")
+            self.title.setText(empty if self._source() else "")
             self.meta.setText("")
             self.description.setText("")
             return
         self.title.setText(entry.name)
         parts = [_tr("by {0}").format(entry.author),
                  _tr("{0} tweak(s)").format(entry.tweak_count)]
+        if templates:
+            parts.append(_size_text(entry.size))
         if entry.ios_range():
             parts.append(_tr("iOS {0}").format(entry.ios_range()))
         if entry.tags:
             parts.append(", ".join(entry.tags))
+        if entry.untested:
+            parts.append("⚠ " + _tr("not tested on a device by its author"))
+        if state == preset_catalog.UPDATE:
+            parts.append(_tr("a newer version than yours"))
+        elif state == preset_catalog.INSTALLED:
+            parts.append(_tr("already added") if templates else _tr("already imported"))
         self.meta.setText("  ·  ".join(parts))
         self.description.setText(entry.description)
         self.description.setVisible(bool(entry.description))
+        if templates:
+            self.writes.setText(self._writes_text(entry))
+            return
         report = assess(self._tweaks(entry), self.device_version, self.device_model, hotload=self.hotload)
         self.risk_panel = RiskPanel(report)
         self._risk_holder.addWidget(self.risk_panel)
+
+    @staticmethod
+    def _writes_text(entry):
+        lines = []
+        if entry.domain:
+            lines.append(_tr("Restores its own files to {0}.").format(entry.domain))
+        if entry.writes:
+            lines.append(_tr("What its tweaks write on the iPhone:"))
+            lines += [f"• {label}: " + ", ".join(paths) for label, paths in entry.writes]
+        return "\n".join(lines)
 
     def _tweaks(self, entry):
         return share_code.decode(entry.code)["tweaks"]
@@ -264,24 +375,99 @@ class CatalogDialog(_ThemedDialog):
         entry = self.selected_entry()
         if entry is None:
             return
+        if isinstance(entry, preset_catalog.TemplateEntry):
+            self._start_download(entry)
+            return
+        state, existing = self.status_of(entry)
         try:
-            name = self.pm.import_share_code(entry.code, entry.name)
+            if state == preset_catalog.UPDATE:
+                # an update replaces the imported preset under its current name
+                name = self.pm.import_share_code(entry.code, existing, preset_catalog.catalog_mark(entry),
+                                                 replace=True)
+            else:
+                name = self.pm.import_share_code(entry.code, entry.name, preset_catalog.catalog_mark(entry))
         except (share_code.ShareCodeError, OSError) as error:
             QMessageBox.critical(self, self.windowTitle(), _error_text(error))
             return
         self.imported.append(name)
+        self.refresh_installed()
+        self._changed()
+        if state == preset_catalog.UPDATE:
+            text = _tr("“{0}” was updated. Load it again on the Presets page to use the new version.")
+        else:
+            text = _tr("“{0}” was saved to your presets. Load it on the Presets page to use it.")
+        QMessageBox.information(self, self.windowTitle(), text.format(name))
+
+    def _start_download(self, entry):
+        if self._download is not None:
+            return
+        if not hasattr(self, "_nam"):
+            self._nam = QNetworkAccessManager(self)
+        request = QNetworkRequest(QUrl(entry.url))
+        request.setRawHeader(b"User-Agent", b"GoldenNugget")
+        request.setTransferTimeout(60000)
+        reply = self._nam.get(request)
+        self._download = (reply, entry)
+        reply.downloadProgress.connect(lambda received, _total: (
+            received > entry.size and reply.abort()))
+        reply.finished.connect(self._on_downloaded)
+        self.import_button.setEnabled(False)
+        self.status.setText(_tr("Downloading “{0}”…").format(entry.name))
+        self.status.setVisible(True)
+
+    def _on_downloaded(self):
+        if self._download is None:
+            return
+        (reply, entry), self._download = self._download, None
+        data = bytes(reply.readAll())
+        error, message = reply.error(), reply.errorString()
+        reply.deleteLater()
+        self.status.setText("")
+        self._show_selected()
+        if error != QNetworkReply.NetworkError.NoError:
+            QMessageBox.critical(self, self.windowTitle(), _tr("Could not download the template: {0}").format(message))
+            return
+        self.install_template(entry, data)
+
+    def install_template(self, entry, data) -> bool:
+        """Check, store and add downloaded template bytes."""
+        try:
+            path = preset_catalog.save_template(entry, data)
+            self.add_template(path, self.device_version)
+        except preset_catalog.CatalogError as error:
+            QMessageBox.critical(self, self.windowTitle(), _error_text(error))
+            return False
+        except Exception as error:  # the template loader raises several kinds
+            QMessageBox.critical(self, self.windowTitle(),
+                                 _tr("The template could not be added: {0}").format(error))
+            return False
+        self.added_templates.append(path)
+        self.refresh_installed()
+        self._changed()
         QMessageBox.information(
             self, self.windowTitle(),
-            _tr("“{0}” was saved to your presets. Load it on the Presets page to use it.").format(name))
+            _tr("“{0}” was added to PosterBoard → Templates. Turn on the tweaks you want there, "
+                "then apply.").format(entry.name))
+        return True
+
+    def _changed(self):
+        if self.on_change is not None:
+            self.on_change()
+
+    def stop(self):
+        """Abort downloads still running (the embedded page never calls done())."""
+        for pending in (self._reply, self._download[0] if self._download else None):
+            if pending is not None:
+                pending.abort()
+                pending.deleteLater()
+        self._reply = self._download = None
 
     def _open_repo(self):
-        QDesktopServices.openUrl(QUrl(preset_catalog.REPO_URL + "#submitting-a-preset"))
+        anchor = "#submitting-a-template" if self.showing_templates() else "#submitting-a-preset"
+        QDesktopServices.openUrl(QUrl(preset_catalog.REPO_URL + anchor))
 
     def done(self, result):
-        if self._reply is not None:
-            reply, self._reply = self._reply, None
-            reply.abort()
-            reply.deleteLater()
+        self.stop()
         super().done(result)
 
 
@@ -326,6 +512,9 @@ class SubmitPresetDialog(_ThemedDialog):
         self.ios_min_edit = self._field(_tr("Lowest iOS"), _tr("Any"), ios, 8, details)
         self.ios_max_edit = self._field(_tr("Highest iOS"), _tr("Any"), "", 8, details)
         self._layout.addLayout(details)
+        self.tested_check = QCheckBox(_tr("I tested this preset on my iPhone"))
+        self.tested_check.setToolTip(_tr("Leave it off and the catalog marks the preset as not tested on a device."))
+        self._layout.addWidget(self.tested_check)
 
         from src.controllers.risk_assessment import assess
         from src.gui.ios.risk_panel import RiskPanel
@@ -374,7 +563,8 @@ class SubmitPresetDialog(_ThemedDialog):
             self.name_edit.text(), self.author_edit.text(), self.code,
             description=self.description_edit.toPlainText(),
             ios_min=self.ios_min_edit.text().strip(), ios_max=self.ios_max_edit.text().strip(),
-            tags=self.tags_edit.text().split(","), validate=self.pm._valid_import_structure)
+            tags=self.tags_edit.text().split(","), validate=self.pm._valid_import_structure,
+            untested=not self.tested_check.isChecked())
 
     def _submit(self):
         try:
@@ -404,8 +594,16 @@ def browse_catalog_flow(parent, pm, window=None):
     dialog = CatalogDialog(pm, version, model, hotload, parent)
     dialog.exec()
     imported = list(dialog.imported)
+    if dialog.added_templates:
+        refresh_template_list(window)
     dialog.deleteLater()
     return imported
+
+
+def refresh_template_list(window):
+    page = getattr(window, "ios_templates", None)
+    if page is not None and hasattr(page, "_load_templates_list"):
+        page._load_templates_list()
 
 
 def submit_preset_flow(parent, pm, name, window=None) -> bool:

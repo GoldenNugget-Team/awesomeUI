@@ -15,7 +15,7 @@ from typing import Optional
 from PySide6.QtCore import QCoreApplication, QT_TRANSLATE_NOOP, QDate, QLocale, QPointF, QRectF, QSize, Qt, QTime
 from PySide6.QtGui import (
     QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QPen,
-    QRadialGradient,
+    QRadialGradient, QTransform,
 )
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
@@ -39,6 +39,7 @@ class TwinApp:
     name: str
     color: str = "#888888"
     glyph: str = ""
+    color2: str = ""                 # bottom of the background gradient
     image: Optional[str] = None      # icon theme PNG
     show_label: bool = True
     kind: str = ""                   # "clock" / "calendar" draw live faces
@@ -60,6 +61,7 @@ class TwinState:
     build_label: str = ""
     themed: list = field(default_factory=list)
     wallpaper: Optional[str] = None  # image file
+    stock_icons: dict = field(default_factory=dict)  # app name -> icon PNG from the iPhone
     shown: list = field(default_factory=list)    # translated effect names
     not_shown: int = 0
 
@@ -74,6 +76,7 @@ VISIBLE = {
     "NoLiquidDock": QT_TRANSLATE_NOOP("DeviceTwin", "Solid Dock"),
     "UseFlatIconsEverywhere": QT_TRANSLATE_NOOP("DeviceTwin", "Flat icons"),
     "SBHideSearchAffordance": QT_TRANSLATE_NOOP("DeviceTwin", "Search button hidden"),
+    "SBHomeScreenShowsSearchButton": QT_TRANSLATE_NOOP("DeviceTwin", "Search button hidden"),
     "DisableSecondsHand": QT_TRANSLATE_NOOP("DeviceTwin", "Clock icon without seconds hand"),
     "SBBuildNumber": QT_TRANSLATE_NOOP("DeviceTwin", "Build number in the status bar"),
     "RTL": QT_TRANSLATE_NOOP("DeviceTwin", "Right-to-left layout"),
@@ -136,7 +139,7 @@ def build_state(tweaks_data, version="", model="", build="", wallpaper=None) -> 
     state.glass_clock = "NoLiquidClock" not in on
     state.glass_dock = "NoLiquidDock" not in on
     state.glass_icons = "UseFlatIconsEverywhere" not in on
-    state.search_button = "SBHideSearchAffordance" not in on
+    state.search_button = not {"SBHideSearchAffordance", "SBHomeScreenShowsSearchButton"}.intersection(on)
     state.seconds_hand = "DisableSecondsHand" not in on
     state.rtl = "RTL" in on
     if "SBBuildNumber" in on:
@@ -176,29 +179,31 @@ def current_wallpaper() -> Optional[str]:
 
 # --- painting -------------------------------------------------------------
 
+# (name, gradient top, gradient bottom, pictogram) -- stand-ins drawn in
+# code below, not Apple artwork.
 _STOCK = (
-    (QT_TRANSLATE_NOOP("DeviceTwin", "FaceTime"), "#34C759", "▶"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Calendar"), "#FFFFFF", "", "calendar"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Photos"), "#FFFFFF", "✿"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Camera"), "#8E8E93", "◉"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Mail"), "#1E90FF", "✉"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Notes"), "#FFD60A", "≡"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Reminders"), "#FFFFFF", "☰"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Clock"), "#000000", "", "clock"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Weather"), "#2F7DE1", "☀"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Maps"), "#5AC85A", "➤"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Music"), "#FA2D48", "♫"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Settings"), "#8E8E93", "⚙"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "App Store"), "#0A84FF", "A"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Wallet"), "#1C1C1E", "▤"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Health"), "#FFFFFF", "♥"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Files"), "#0A84FF", "▢"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "FaceTime"), "#5EE07A", "#1FB84A", "facetime"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Calendar"), "#FFFFFF", "#FFFFFF", "calendar"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Photos"), "#FFFFFF", "#F2F2F7", "photos"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Camera"), "#D8D8DD", "#8E8E93", "camera"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Mail"), "#5AC8FA", "#1A73F0", "mail"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Notes"), "#FFFFFF", "#F7F7F7", "notes"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Reminders"), "#FFFFFF", "#F7F7F7", "reminders"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Clock"), "#000000", "#000000", "clock"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Weather"), "#5AAEFA", "#1C5BD4", "weather"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Maps"), "#F4F1E6", "#D9EDCF", "maps"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Music"), "#FF6378", "#F7223C", "music"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Settings"), "#D1D1D6", "#8E8E93", "settings"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "App Store"), "#1BC9FB", "#1871E8", "appstore"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Wallet"), "#2C2C2E", "#000000", "wallet"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Health"), "#FFFFFF", "#F7F7F7", "health"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Files"), "#FFFFFF", "#F2F2F7", "files"),
 )
 _DOCK = (
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Phone"), "#34C759", "✆"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Safari"), "#0A84FF", "◎"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Messages"), "#34C759", "✉"),
-    (QT_TRANSLATE_NOOP("DeviceTwin", "Music"), "#FA2D48", "♫"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Phone"), "#5EE07A", "#1FB84A", "phone"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Safari"), "#FFFFFF", "#E5E5EA", "safari"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Messages"), "#5EE07A", "#1FB84A", "messages"),
+    (QT_TRANSLATE_NOOP("DeviceTwin", "Music"), "#FF6378", "#F7223C", "music"),
 )
 
 
@@ -209,9 +214,259 @@ def _font(px, weight=QFont.Weight.DemiBold):
     return font
 
 
-def _app(entry):
-    name, color, glyph, *kind = entry
-    return TwinApp(name, color, glyph, kind=kind[0] if kind else "")
+def _app(entry, icons=None):
+    name, top, bottom, kind = entry
+    return TwinApp(name, top, color2=bottom, kind=kind, image=(icons or {}).get(name))
+
+
+# --- pictograms -----------------------------------------------------------
+# Each draws into a unit square (the painter is scaled to the icon), so the
+# shapes stay crisp at any preview size.
+
+def _stroke(p, color, width):
+    p.setPen(QPen(QColor(color), width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                  Qt.PenJoinStyle.RoundJoin))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+
+
+def _fill(p, color):
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(color))
+
+
+def _poly(*points):
+    path = QPainterPath(QPointF(*points[0]))
+    for point in points[1:]:
+        path.lineTo(QPointF(*point))
+    path.closeSubpath()
+    return path
+
+
+def _pict_facetime(p):
+    _fill(p, "#FFFFFF")
+    p.drawRoundedRect(QRectF(0.17, 0.32, 0.42, 0.36), 0.08, 0.08)
+    p.drawPath(_poly((0.62, 0.47), (0.83, 0.33), (0.83, 0.67), (0.62, 0.53)))
+
+
+def _pict_photos(p):
+    colors = ("#F9C21B", "#F68B1F", "#EE3E37", "#C2378F", "#7E57C2", "#2A8FD8", "#3DB54A", "#A5CD39")
+    p.setPen(Qt.PenStyle.NoPen)
+    for index, color in enumerate(colors):
+        p.save()
+        p.translate(0.5, 0.5)
+        p.rotate(index * 45)
+        petal = QColor(color)
+        petal.setAlpha(215)
+        p.setBrush(petal)
+        p.drawRoundedRect(QRectF(-0.085, -0.37, 0.17, 0.3), 0.085, 0.085)
+        p.restore()
+
+
+def _pict_camera(p):
+    _fill(p, "#2C2C2E")
+    p.drawRoundedRect(QRectF(0.36, 0.25, 0.28, 0.12), 0.04, 0.04)
+    p.drawRoundedRect(QRectF(0.14, 0.31, 0.72, 0.45), 0.1, 0.1)
+    _fill(p, "#636366")
+    p.drawEllipse(QPointF(0.5, 0.535), 0.165, 0.165)
+    _fill(p, "#0B0B0D")
+    p.drawEllipse(QPointF(0.5, 0.535), 0.115, 0.115)
+    _fill(p, "#5A6B8C")
+    p.drawEllipse(QPointF(0.47, 0.505), 0.035, 0.035)
+    _fill(p, "#FFD60A")
+    p.drawEllipse(QPointF(0.76, 0.39), 0.025, 0.025)
+
+
+def _pict_mail(p):
+    _fill(p, "#FFFFFF")
+    p.drawRoundedRect(QRectF(0.17, 0.29, 0.66, 0.44), 0.06, 0.06)
+    _stroke(p, "#2F8CF5", 0.035)
+    path = QPainterPath(QPointF(0.2, 0.33))
+    path.lineTo(0.5, 0.55)
+    path.lineTo(0.8, 0.33)
+    p.drawPath(path)
+
+
+def _pict_notes(p):
+    band = QLinearGradient(0, 0, 0, 0.27)
+    band.setColorAt(0, QColor("#FFE45C"))
+    band.setColorAt(1, QColor("#FFC800"))
+    p.fillRect(QRectF(0, 0, 1, 0.27), band)
+    _stroke(p, "#C7C7CC", 0.022)
+    for y in (0.45, 0.6, 0.75):
+        p.drawLine(QPointF(0.14, y), QPointF(0.86, y))
+
+
+def _pict_reminders(p):
+    for y, color in ((0.3, "#0A84FF"), (0.5, "#FF3B30"), (0.7, "#FF9500")):
+        _fill(p, color)
+        p.drawEllipse(QPointF(0.25, y), 0.07, 0.07)
+        _fill(p, "#FFFFFF")
+        p.drawEllipse(QPointF(0.25, y), 0.035, 0.035)
+        _stroke(p, "#D1D1D6", 0.035)
+        p.drawLine(QPointF(0.42, y), QPointF(0.82, y))
+
+
+def _pict_weather(p):
+    _fill(p, "#FFD60A")
+    p.drawEllipse(QPointF(0.4, 0.38), 0.16, 0.16)
+    cloud = QPainterPath()
+    cloud.addEllipse(QPointF(0.44, 0.62), 0.13, 0.13)
+    cloud.addEllipse(QPointF(0.61, 0.55), 0.16, 0.16)
+    cloud.addEllipse(QPointF(0.76, 0.65), 0.1, 0.1)
+    cloud.addRoundedRect(QRectF(0.31, 0.6, 0.55, 0.15), 0.075, 0.075)
+    cloud.setFillRule(Qt.FillRule.WindingFill)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor("#FFFFFF"))
+    p.drawPath(cloud)
+
+
+def _pict_maps(p):
+    _fill(p, "#A8D98F")
+    p.drawRoundedRect(QRectF(-0.1, -0.1, 0.45, 0.42), 0.1, 0.1)
+    _fill(p, "#8CCBF5")
+    p.drawRoundedRect(QRectF(0.62, 0.64, 0.5, 0.5), 0.12, 0.12)
+    _stroke(p, "#FFFFFF", 0.16)
+    p.drawLine(QPointF(-0.05, 1.05), QPointF(1.05, -0.05))
+    _stroke(p, "#FFCC33", 0.03)
+    p.drawLine(QPointF(-0.05, 1.05), QPointF(1.05, -0.05))
+    p.setPen(QPen(QColor("#FFFFFF"), 0.04, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                  Qt.PenJoinStyle.RoundJoin))
+    p.setBrush(QColor("#0A84FF"))
+    p.drawPath(_poly((0.5, 0.3), (0.67, 0.7), (0.5, 0.61), (0.33, 0.7)))
+
+
+def _pict_music(p):
+    _fill(p, "#FFFFFF")
+    p.drawPath(_poly((0.4, 0.3), (0.74, 0.22), (0.74, 0.32), (0.4, 0.4)))
+    p.drawRect(QRectF(0.4, 0.3, 0.05, 0.4))
+    p.drawRect(QRectF(0.69, 0.22, 0.05, 0.4))
+    for x, y in ((0.35, 0.7), (0.64, 0.62)):
+        p.save()
+        p.translate(x, y)
+        p.rotate(-20)
+        p.drawEllipse(QPointF(0, 0), 0.1, 0.075)
+        p.restore()
+
+
+def _pict_settings(p):
+    p.setPen(Qt.PenStyle.NoPen)
+    gear = QPainterPath()
+    gear.addEllipse(QPointF(0.5, 0.5), 0.29, 0.29)
+    tooth = QPainterPath()
+    tooth.addRoundedRect(QRectF(-0.05, -0.38, 0.1, 0.14), 0.02, 0.02)
+    for index in range(12):
+        gear.addPath(QTransform().translate(0.5, 0.5).rotate(index * 30).map(tooth))
+    gear.setFillRule(Qt.FillRule.WindingFill)
+    p.setBrush(QColor("#3A3A3C"))
+    p.drawPath(gear)
+    p.setBrush(QColor("#B8B8BD"))
+    p.drawEllipse(QPointF(0.5, 0.5), 0.19, 0.19)
+    p.setBrush(QColor("#3A3A3C"))
+    p.drawEllipse(QPointF(0.5, 0.5), 0.07, 0.07)
+
+
+def _pict_appstore(p):
+    _stroke(p, "#FFFFFF", 0.075)
+    p.drawLine(QPointF(0.56, 0.23), QPointF(0.31, 0.7))
+    p.drawLine(QPointF(0.44, 0.23), QPointF(0.69, 0.7))
+    p.drawLine(QPointF(0.24, 0.58), QPointF(0.76, 0.58))
+
+
+def _pict_wallet(p):
+    colors = ("#0A84FF", "#30D158", "#FFD60A", "#FF9F0A", "#FF453A")
+    for index, color in enumerate(colors):
+        _fill(p, color)
+        p.drawRoundedRect(QRectF(0.17, 0.22 + index * 0.065, 0.66, 0.2), 0.05, 0.05)
+    _fill(p, "#48484A")
+    p.drawRoundedRect(QRectF(0.13, 0.5, 0.74, 0.3), 0.07, 0.07)
+
+
+def _pict_health(p):
+    heart = QPainterPath(QPointF(0.5, 0.78))
+    heart.cubicTo(0.16, 0.56, 0.15, 0.3, 0.33, 0.26)
+    heart.cubicTo(0.42, 0.24, 0.48, 0.3, 0.5, 0.35)
+    heart.cubicTo(0.52, 0.3, 0.58, 0.24, 0.67, 0.26)
+    heart.cubicTo(0.85, 0.3, 0.84, 0.56, 0.5, 0.78)
+    gradient = QLinearGradient(0, 0.25, 0, 0.8)
+    gradient.setColorAt(0, QColor("#FF6482"))
+    gradient.setColorAt(1, QColor("#FF2D55"))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(gradient)
+    p.drawPath(heart)
+
+
+def _pict_files(p):
+    _fill(p, "#3D9BF5")
+    p.drawRoundedRect(QRectF(0.15, 0.27, 0.32, 0.16), 0.05, 0.05)
+    body = QLinearGradient(0, 0.33, 0, 0.78)
+    body.setColorAt(0, QColor("#62B8FF"))
+    body.setColorAt(1, QColor("#1D8BF1"))
+    p.setBrush(body)
+    p.drawRoundedRect(QRectF(0.15, 0.34, 0.7, 0.44), 0.07, 0.07)
+
+
+def _pict_phone(p):
+    # handset drawn level (handle up, cups down), then turned so the earpiece
+    # sits top-left and the mouthpiece bottom-right
+    handset = QPainterPath(QPointF(-0.34, 0.13))
+    handset.lineTo(-0.34, 0.0)
+    handset.cubicTo(-0.34, -0.22, 0.34, -0.22, 0.34, 0.0)
+    handset.lineTo(0.34, 0.13)
+    handset.lineTo(0.15, 0.13)
+    handset.lineTo(0.15, 0.04)
+    handset.cubicTo(0.15, -0.07, -0.15, -0.07, -0.15, 0.04)
+    handset.lineTo(-0.15, 0.13)
+    handset.closeSubpath()
+    p.save()
+    p.translate(0.5, 0.5)
+    p.rotate(225)
+    p.translate(0, 0.02)
+    p.setPen(QPen(QColor("#FFFFFF"), 0.06, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                  Qt.PenJoinStyle.RoundJoin))
+    p.setBrush(QColor("#FFFFFF"))
+    p.drawPath(handset)
+    p.restore()
+
+
+def _pict_safari(p):
+    disc = QLinearGradient(0, 0.12, 0, 0.88)
+    disc.setColorAt(0, QColor("#4FC3F7"))
+    disc.setColorAt(1, QColor("#1565E0"))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(disc)
+    p.drawEllipse(QPointF(0.5, 0.5), 0.39, 0.39)
+    _stroke(p, "#FFFFFF", 0.012)
+    import math
+    for index in range(24):
+        a = math.radians(index * 15)
+        inner = 0.3 if index % 2 else 0.27
+        p.drawLine(QPointF(0.5 + math.sin(a) * inner, 0.5 - math.cos(a) * inner),
+                   QPointF(0.5 + math.sin(a) * 0.34, 0.5 - math.cos(a) * 0.34))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor("#FF3B30"))
+    p.drawPath(_poly((0.5, 0.5), (0.45, 0.45), (0.72, 0.28), (0.55, 0.55)))
+    p.setBrush(QColor("#FFFFFF"))
+    p.drawPath(_poly((0.5, 0.5), (0.55, 0.55), (0.28, 0.72), (0.45, 0.45)))
+
+
+def _pict_messages(p):
+    _fill(p, "#FFFFFF")
+    p.drawEllipse(QPointF(0.5, 0.47), 0.33, 0.27)
+    tail = QPainterPath(QPointF(0.28, 0.6))
+    tail.quadTo(0.27, 0.72, 0.18, 0.78)
+    tail.quadTo(0.35, 0.78, 0.45, 0.69)
+    tail.closeSubpath()
+    p.drawPath(tail)
+
+
+_PICTOGRAMS = {
+    "facetime": _pict_facetime, "photos": _pict_photos, "camera": _pict_camera,
+    "mail": _pict_mail, "notes": _pict_notes, "reminders": _pict_reminders,
+    "weather": _pict_weather, "maps": _pict_maps, "music": _pict_music,
+    "settings": _pict_settings, "appstore": _pict_appstore, "wallet": _pict_wallet,
+    "health": _pict_health, "files": _pict_files, "phone": _pict_phone,
+    "safari": _pict_safari, "messages": _pict_messages,
+}
 
 
 def _paint_wallpaper(p, screen, state, images):
@@ -252,7 +507,13 @@ def _paint_icon(p, rect, app, s, glass, images, seconds_hand=True, now=None):
     if image is not None and not image.isNull():
         p.drawImage(rect, image)
     else:
-        p.fillPath(path, QColor(app.color))
+        if app.color2:
+            background = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+            background.setColorAt(0, QColor(app.color))
+            background.setColorAt(1, QColor(app.color2))
+            p.fillPath(path, background)
+        else:
+            p.fillPath(path, QColor(app.color))
         light = QColor(app.color).lightness() > 200
         ink = QColor(0x1C, 0x1C, 0x1E) if light else QColor(255, 255, 255)
         if app.kind == "clock":
@@ -266,6 +527,12 @@ def _paint_icon(p, rect, app, s, glass, images, seconds_hand=True, now=None):
             p.setFont(_font(rect.height() * 0.5, QFont.Weight.Normal))
             p.drawText(QRectF(rect.left(), rect.top() + rect.height() * 0.28, rect.width(), rect.height() * 0.62),
                        Qt.AlignmentFlag.AlignCenter, str(QDate.currentDate().day()))
+        elif app.kind in _PICTOGRAMS:
+            p.save()
+            p.translate(rect.topLeft())
+            p.scale(rect.width(), rect.height())
+            _PICTOGRAMS[app.kind](p)
+            p.restore()
         else:
             p.setPen(ink)
             p.setFont(_font(rect.height() * 0.46, QFont.Weight.Bold))
@@ -381,7 +648,7 @@ def paint_home_screen(p, screen, s, state, images):
     if state.build_label:
         status = StatusBarPreviewState(**{**status.__dict__, "time": state.build_label})
     paint_status_bar(p, screen, status, False, cutout=state.cutout)
-    apps = [_app(entry) for entry in _STOCK] + list(state.themed)
+    apps = [_app(entry, state.stock_icons) for entry in _STOCK] + list(state.themed)
     apps = apps[:24]
     icon = 62 * s
     margin = 27 * s
@@ -397,7 +664,7 @@ def paint_home_screen(p, screen, s, state, images):
         if app.show_label:
             p.setPen(QColor(255, 255, 255))
             p.setFont(label_font)
-            name = _tr(app.name) if not app.image else app.name
+            name = _tr(app.name) if app.kind or not app.image else app.name
             p.drawText(QRectF(rect.left() - gap / 2, rect.bottom() + 4 * s, icon + gap, 16 * s),
                        Qt.AlignmentFlag.AlignHCenter,
                        QFontMetricsF(label_font).elidedText(name, Qt.TextElideMode.ElideRight, icon + gap))
@@ -406,18 +673,34 @@ def paint_home_screen(p, screen, s, state, images):
     dock = QRectF(screen.left() + 12 * s, screen.bottom() - dock_h - (20 * s if not state.home_button else 6 * s),
                   screen.width() - 24 * s, dock_h)
     if state.search_button:
-        pill = QRectF(screen.center().x() - 44 * s, dock.top() - 42 * s, 88 * s, 30 * s)
-        _glass(p, pill, 15 * s, s, strong=False)
-        p.setPen(QColor(255, 255, 255, 235))
-        p.setFont(_font(13 * s, QFont.Weight.DemiBold))
-        p.drawText(pill, Qt.AlignmentFlag.AlignCenter, "⌕ " + _tr("Search"))
+        # hugs its label like the iOS pill: magnifier + text, slim padding
+        font = _font(13 * s, QFont.Weight.DemiBold)
+        label = _tr("Search")
+        text_w = QFontMetricsF(font).horizontalAdvance(label)
+        glyph, pad, space = 10 * s, 10 * s, 4 * s
+        width = pad + glyph + space + text_w + pad
+        pill = QRectF(screen.center().x() - width / 2, dock.top() - 36 * s, width, 26 * s)
+        p.setPen(QPen(QColor(255, 255, 255, 60), 0.6 * s))
+        p.setBrush(QColor(255, 255, 255, 40))
+        p.drawRoundedRect(pill, pill.height() / 2, pill.height() / 2)
+        ink = QColor(255, 255, 255, 235)
+        lens = QPointF(pill.left() + pad + glyph * 0.42, pill.center().y() - glyph * 0.08)
+        p.setPen(QPen(ink, 1.5 * s, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(lens, glyph * 0.34, glyph * 0.34)
+        p.drawLine(QPointF(lens.x() + glyph * 0.25, lens.y() + glyph * 0.25),
+                   QPointF(pill.left() + pad + glyph, lens.y() + glyph * 0.58))
+        p.setPen(ink)
+        p.setFont(font)
+        p.drawText(QRectF(pill.left() + pad + glyph + space, pill.top(), text_w + 1, pill.height()),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
     if state.glass_dock:
         _glass(p, dock, 34 * s, s)
     else:
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(0x3A, 0x3A, 0x3C, 215))
         p.drawRoundedRect(dock, 34 * s, 34 * s)
-    dock_apps = [_app(entry) for entry in _DOCK]
+    dock_apps = [_app(entry, state.stock_icons) for entry in _DOCK]
     if state.rtl:
         dock_apps.reverse()
     step = (dock.width() - 4 * icon) / 5
@@ -448,7 +731,7 @@ class DeviceTwinView(QWidget):
     def set_state(self, state: TwinState):
         self.state = state
         self._images = {}
-        for path in [state.wallpaper] + [app.image for app in state.themed]:
+        for path in [state.wallpaper, *state.stock_icons.values()] + [app.image for app in state.themed]:
             if path and path not in self._images:
                 self._images[path] = QImage(path)
         self.update()

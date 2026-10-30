@@ -1,3 +1,4 @@
+from src.devicemanagement.device_capabilities import device_os_name
 from PySide6.QtCore import QCoreApplication
 from webbrowser import open_new_tab
 from ..page import Page
@@ -92,4 +93,4 @@ class HomePage(Page):
         elif self.window.device_manager.get_current_device_partially_supported():
             support_str = f"<span style=\"color: {c.warning};\">" + QCoreApplication.tr("Partially Supported") + "</span></a>"
         self.ui.phoneVersionLbl.setText(
-            f"<a style=\"text-decoration:none; color: {c.text_secondary};\" href=\"#\">iOS {version} ({build}) {support_str}")
+            f"<a style=\"text-decoration:none; color: {c.text_secondary};\" href=\"#\">{device_os_name(self.window.device_manager.get_current_device_model())} {version} ({build}) {support_str}")

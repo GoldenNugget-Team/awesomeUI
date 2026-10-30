@@ -35,13 +35,19 @@ class TweakInfoDialog(QDialog):
             body.addWidget(widget)
 
         label(title, "confirmTitle")
+        label(tr("Intended effect"), "confirmTitle")
         label(tr(spec.description) if spec.description else
               tr("No detailed description is available for this tweak yet."))
+        label(tr("Hidden settings can be ignored by your system version. "
+                 "These descriptions explain intended effects, not a verified result on your device."), "confirmMuted")
+        if spec.warning:
+            label(tr("Before applying"), "confirmTitle")
+            label(tr(spec.warning))
         requirements = []
         if spec.min_version:
-            requirements.append(tr("Minimum iOS version: {0}").format(spec.min_version))
+            requirements.append(tr("Minimum system version: {0}").format(spec.min_version))
         if spec.max_version:
-            requirements.append(tr("Maximum iOS version: {0}").format(spec.max_version))
+            requirements.append(tr("Maximum system version: {0}").format(spec.max_version))
         if spec.iphone_only:
             requirements.append(tr("iPhone only"))
         if spec.ipad_only:
@@ -50,11 +56,30 @@ class TweakInfoDialog(QDialog):
         label("\n".join(requirements) if requirements else
               tr("No additional version or device restrictions are listed for this tweak."))
         if spec.kind == Kind.NUMBER:
-            label(tr("Range: {0} – {1}").format(f"{spec.min_value:g}", f"{spec.max_value:g}"))
+            label(tr("Allowed input: {0} – {1}").format(f"{spec.min_value:g}", f"{spec.max_value:g}"))
         label(tr("How to restore defaults"), "confirmTitle")
-        label(tr("Turning off a tweak only removes it from the next apply. "
-                 "To restore original values, open Apply, choose Restore Defaults, "
-                 "and select the relevant tweak page."), "confirmMuted")
+        from src.tweaks.tweaks import tweaks
+        from src.tweaks.tweak_classes import (
+            DynamicIslandBorderWriteTest, ExperimentalBooleanPlistTweak,
+            ReversibleBooleanPlistTweak, ResettableNumericPreferenceTweak,
+            OptionalBundlePreferenceTweak,
+        )
+        tweak = tweaks.get(spec.id)
+        if isinstance(tweak, DynamicIslandBorderWriteTest):
+            undo = tr("Turn off and apply again to remove the seven test settings. "
+                      "The separate Disable Dynamic Island setting is not changed.")
+        elif isinstance(tweak, ResettableNumericPreferenceTweak):
+            undo = tr("Enter -1 and apply again to remove this setting.")
+        elif isinstance(tweak, OptionalBundlePreferenceTweak):
+            undo = tr("Clear the text and apply again to remove this setting.")
+        elif isinstance(tweak, (ExperimentalBooleanPlistTweak, ReversibleBooleanPlistTweak)):
+            undo = tr("Turn off and apply again to reverse this request. "
+                      "This does not recover a previous custom value.")
+        else:
+            undo = tr("Turning this off stops it being included in the next apply. "
+                      "To reset changes already on the device, open Apply, choose Restore Defaults, "
+                      "and select the relevant page.")
+        label(undo, "confirmMuted")
         body.addStretch()
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)

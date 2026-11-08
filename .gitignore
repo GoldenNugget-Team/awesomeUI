@@ -1,4 +1,0 @@
-__pycache__/
-*.py[cod]
-src/qt/resources_rc.py
-*.rcc
